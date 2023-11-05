@@ -1,0 +1,155 @@
+---
+title: "survival paper"
+output: html_document
+date: "2023-11-03"
+---
+---
+```{r, setup, echo=FALSE, include=FALSE}
+
+library(tidyverse)
+library(brms)
+library(tidybayes)
+library(cowplot)
+library(multcomp)
+```
+
+```{r load}
+dat_exp1 <- read_tsv("survival/data/paper_data/exp1_functional_test_all_cycle3_2019.txt") %>% mutate(cage2 = paste(group, cage), group = factor(group, levels = c("control", "coevolved")))
+
+exp2_controlDatFiltered <- read_tsv("survival/data/paper_data/exp2_control_exp_functional_test_filtered_microbiome_2020.txt") %>% mutate(cage2 = paste(group, cage),group = factor(group, levels = c("filtered_control", "filtered_Chlorothalonil")))
+
+exp3_controladdedchloro <- read_tsv("survival/data/paper_data/exp3_control_exp_functional_test_added_Chlorothalonil_2020.txt") %>% mutate(cage2 = paste(group, cage),group = factor(group, levels = c("control", "added_Chlorothalonil")))
+
+exp_4_control2addedchloro <- read_tsv("survival/paper_data/paper/exp4_hormesis_added_chlorothalonil.txt") %>% mutate(cage2 = paste(group, cage),group = factor(group, levels = c("control", "exposed")))
+
+exp_5_social_trans_cycle_2 <- read_tsv("survival/data/paper_data/exp5_15_11_2020_cycle2_survival_blue_only_chlorothalonil.txt") %>% mutate(cage2 = paste(group, cage),group = factor(group, levels = c("control", "exposed")))
+
+exp_6_social_trans_cycle_1 <- read_tsv("survival/data/paper_data/exp6_14_12_2020_cycle_1_chloro_surv_after_stress.txt") %>% mutate(cage2 = paste(group, cage),group = factor(group, levels = c("control", "exposed")))
+
+exp_6_social_trans_cycle_2 <- read_tsv("survival/data/paper_data/exp6_14_12_2020_cycle_2_chloro_surv_after_stress.txt") %>% mutate(cage2 = paste(group, cage),group = factor(group, levels = c("control", "exposed")))
+
+exp_7_social_trans_cycle_3 <- read_tsv("survival/data/paper_data/exp7_cycle_3_transmission_2021.txt") %>% mutate(cage2 = paste(group, cage),group = factor(group, levels = c("control", "exposed")))
+
+priorsCage <- c(prior(student_t(3,0,2.5), class = "b"))
+
+```
+
+```{r cache=T}
+exp1 <- brm(alive ~ 0 + cage2 , data = filter(dat_exp1, treatment == "Chlorothalonil"), family= bernoulli(), control = list(adapt_delta = .99, max_treedepth = 10), iter = 5000, cores = 4, prior = priorsCage)
+plot(exp1)
+summary(exp1)
+(hypexp1 <- hypothesis(exp1, "cage2co_evolvedcage1 + cage2co_evolvedcage2 + cage2co_evolvedcage3 = cage2controlcage1 +cage2controlcage2 + cage2controlcage3"))
+```
+
+# Filtered microbiome added control
+
+```{r cache=T}
+exp2_ContrFiltered <- brm(alive ~ 0 + cage2, data = exp2_controlDatFiltered, family= bernoulli(), control = list(adapt_delta = .99), iter = 5000, cores = 4, prior = priorsCage)
+plot(exp2_ContrFiltered)
+summary(exp2_ContrFiltered)
+(hypexp2_ContrFiltered <- hypothesis(exp2_ContrFiltered, "cage2filtered_Chlorothalonilcage1 + cage2filtered_Chlorothalonilcage2 + cage2filtered_Chlorothalonilcage3 + cage2filtered_Chlorothalonilcage4  = cage2filtered_controlcage1 + cage2filtered_controlcage2 + cage2filtered_controlcage3 + cage2filtered_controlcage4"))
+```
+
+# added chlorothalonil to microbiome transfer
+
+```{r cache=T}
+exp3_controladdedchloro <- brm(alive ~ 0 + cage2, data = exp3_controladdedchloro, family= bernoulli(), control = list(adapt_delta = .99), iter = 5000, cores = 4, prior = priorsCage)
+plot(exp3_controladdedchloro)
+summary(exp3_controladdedchloro)
+(hypexp3_added <- hypothesis(exp3_controladdedchloro, "cage2added_Chlorothalonilcage1 + cage2added_Chlorothalonilcage2 + cage2added_Chlorothalonilcage3 = cage2controlcage1 + cage2controlcage2 + cage2controlcage3"))
+```
+
+# added chlorothalonil to emerged bees
+
+```{r cache=T}
+exp_4_control2addedchloro <- brm(alive ~ 0 + cage2, data = exp_4_control2addedchloro, family= bernoulli(), control = list(adapt_delta = .99), iter = 5000, cores = 4, prior = priorsCage)
+plot(exp_4_control2addedchloro)
+summary(exp_4_control2addedchloro)
+(hypexp4_added <- hypothesis(exp_4_control2addedchloro, "cage2added_Chlorothalonilcage1 + cage2added_Chlorothalonilcage2 + cage2added_Chlorothalonilcage3+ cage2added_Chlorothalonilcage4 = cage2controlcage1 + cage2controlcage2 + cage2controlcage3+ cage2controlcage4"))
+```
+
+#exp 5
+```{r cache=T}
+exp5_trans <- brm(alive ~ 0 + cage2, data = exp_5_social_trans_cycle_2, family= bernoulli(), control = list(adapt_delta = .99), iter = 5000, cores = 4, prior = priorsCage)
+plot(exp5_trans)
+summary(exp5_trans)
+(hypexp5_trans_c2 <- hypothesis(exp5_trans, "cage2exposedcage1 + cage2exposedcage2 + cage2exposedcage3 + cage2exposedcage4 + cage2exposedcage5 = cage2controlcage1 + cage2controlcage2 + cage2controlcage3 + cage2controlcage4 + cage2controlcage5"))
+```
+
+#exp 6
+```{r cache=T}
+exp6_trans_cycle1 <- brm(alive ~ 0 + cage2, data = exp_6_social_trans_cycle_1, family= bernoulli(), control = list(adapt_delta = .99), iter = 5000, cores = 4, prior = priorsCage)
+plot(exp6_trans_cycle1)
+summary(exp6_trans_cycle1)
+(hypexp6_trans_c1 <- hypothesis(exp6_trans_cycle1, "cage2exposedcage1 + cage2exposedcage2 + cage2exposedcage3 + cage2exposedcage4 + cage2exposedcage5+ cage2exposedcage6+ cage2exposedcage7+ cage2exposedcage8+ cage2exposedcage9 = cage2controlcage1 + cage2controlcage2 + cage2controlcage3 + cage2controlcage4 + cage2controlcage5+ cage2controlcage6+ cage2controlcage7+ cage2controlcage8+ cage2controlcage9"))
+```
+
+```{r cache=T}
+exp6_trans_cycle2 <- brm(alive ~ 0 + cage2, data = exp_6_social_trans_cycle_2, family= bernoulli(), control = list(adapt_delta = .99), iter = 5000, cores = 4, prior = priorsCage)
+plot(exp6_trans_cycle2)
+summary(exp6_trans_cycle2)
+(hypexp6_trans_c2 <- hypothesis(exp6_trans_cycle2, "cage2exposedcage1 + cage2exposedcage2 + cage2exposedcage3 + cage2exposedcage4 + cage2exposedcage5+ cage2exposedcage6+ cage2exposedcage7 = cage2controlcage1 + cage2controlcage2 + cage2controlcage3 + cage2controlcage4 + cage2controlcage5+ cage2controlcage6+ cage2controlcage7"))
+```
+
+#exp 6
+```{r cache=T}
+exp7_trans <- brm(alive ~ 0 + cage2, data = exp_7_social_trans_cycle_3, family= bernoulli(), control = list(adapt_delta = .99), iter = 5000, cores = 4, prior = priorsCage)
+plot(exp7_trans)
+summary(exp7_trans)
+(hypexp7_trans_c3 <- hypothesis(exp7_trans, "cage2exposedcage1 + cage2exposedcage2 + cage2exposedcage3 + cage2exposedcage4 + cage2exposedcage5 = cage2controlcage1 + cage2controlcage2 + cage2controlcage3 + cage2controlcage4 + cage2controlcage5"))
+```
+
+
+# Plot results
+
+```{r}
+p1 <- tibble("chlorothalonil" = hypexp1$samples[,1]) %>% gather(key = "contrast", value = "b") %>% group_by(contrast) %>%  ggplot(aes(x = contrast, y=b)) + stat_halfeye(point_interval = mode_hdi, .width = c(.66, .95)) + geom_hline(yintercept = 0, color = "red") + theme_minimal() + theme(axis.title.x = element_blank(), axis.title.y = element_text(vjust = 0.5), plot.margin = unit(c(.5,.5,.5,.5), "cm"), axis.text.x = element_text(angle=45, hjust=1)) + coord_trans(ylim=c(-25,15)) +  ggtitle("exp1 Microbiome transfer") + ylab(expression("Bayes factor difference between\nsurvial in treatment and control group"))
+
+ggsave("survival/paper_figures/exp1_survival_2019.png", height = 6, width = 5)
+
+
+p2 <- tibble("+ gut filtrate" = hypexp2_ContrFiltered$samples[,1]) %>% gather(key = "contrast", value = "b") %>% group_by(contrast) %>%  ggplot(aes(x = contrast, y=b)) + stat_halfeye(point_interval = mode_hdi, .width = c(.66, .95)) + geom_hline(yintercept = 0, color = "red") + theme_minimal() + theme(axis.title.x = element_blank(), axis.title.y = element_text(vjust = 0.5), plot.margin = unit(c(.5,.5,.5,.5), "cm"), axis.text.x = element_text(angle=45, hjust=1)) + coord_trans(ylim=c(-20,15)) +  ggtitle("exp2 filtered gut content") + ylab(expression("Bayes factor difference between\nsurvial in treatment and control group"))
+
+ggsave("survival/paper_figures/exp2_filtered_guts_survival.png", height = 6, width = 5)
+
+
+p3 <- tibble("+ chlorothalonil" = hypexp3_added$samples[,1]) %>% gather(key = "contrast", value = "b") %>% group_by(contrast) %>%  ggplot(aes(x = contrast, y=b)) + stat_halfeye(point_interval = mode_hdi, .width = c(.66, .95)) + geom_hline(yintercept = 0, color = "red") + theme_minimal() + theme(axis.title.x = element_blank(), axis.title.y = element_text(vjust = 0.5), plot.margin = unit(c(.5,.5,.5,.5), "cm"), axis.text.x = element_text(angle=45, hjust=1)) + coord_trans(ylim=c(-20,15)) +  ggtitle("exp3 added chlorothalonil") + ylab(expression("Bayes factor difference between\nsurvial in treatment and control group"))
+
+ggsave("survival/paper_figures/exp3_added_chlorothalonil_survival.png", height = 6, width = 5)
+
+p4 <- tibble("+ chlorothalonil" = hypexp4_added$samples[,1]) %>% gather(key = "contrast", value = "b") %>% group_by(contrast) %>%  ggplot(aes(x = contrast, y=b)) + stat_halfeye(point_interval = mode_hdi, .width = c(.66, .95)) + geom_hline(yintercept = 0, color = "red") + theme_minimal() + theme(axis.title.x = element_blank(), axis.title.y = element_text(vjust = 0.5), plot.margin = unit(c(.5,.5,.5,.5), "cm"), axis.text.x = element_text(angle=45, hjust=1)) + coord_trans(ylim=c(-20,15)) +  ggtitle("exp4 added chlorothalonil") + ylab(expression("Bayes factor difference between\nsurvial in treatment and control group"))
+
+ggsave("survival/paper_figures/exp4_added_chlorothalonil_survival.png", height = 6, width = 5)
+
+
+p5 <- tibble("social contact cycle 2" = hypexp5_trans_c2$samples[,1]) %>% gather(key = "contrast", value = "b") %>% group_by(contrast) %>%  ggplot(aes(x = contrast, y=b)) + stat_halfeye(point_interval = mode_hdi, .width = c(.66, .95)) + geom_hline(yintercept = 0, color = "red") + theme_minimal() + theme(axis.title.x = element_blank(), axis.title.y = element_text(vjust = 0.5), plot.margin = unit(c(.5,.5,.5,.5), "cm"), axis.text.x = element_text(angle=45, hjust=1)) + coord_trans(ylim=c(-20,15)) +  ggtitle("exp5 transfer cycle 2") + ylab(expression("Bayes factor difference between\nsurvial in treatment and control group"))
+
+ggsave("survival/paper_figures/exp5_transfer_cycle2.png", height = 6, width = 5)
+
+
+p6 <- tibble("social contact cycle 1" = hypexp6_trans_c1$samples[,1]) %>% gather(key = "contrast", value = "b") %>% group_by(contrast) %>%  ggplot(aes(x = contrast, y=b)) + stat_halfeye(point_interval = mode_hdi, .width = c(.66, .95)) + geom_hline(yintercept = 0, color = "red") + theme_minimal() + theme(axis.title.x = element_blank(), axis.title.y = element_text(vjust = 0.5), plot.margin = unit(c(.5,.5,.5,.5), "cm"), axis.text.x = element_text(angle=45, hjust=1)) + coord_trans(ylim=c(-20,15)) +  ggtitle("exp6 transfer cycle 1") + ylab(expression("Bayes factor difference between\nsurvial in treatment and control group"))
+
+ggsave("survival/paper_figures/exp6_transfer_cycle1.png", height = 6, width = 5)
+
+
+p6.2 <- tibble("social contact cycle 2" = hypexp6_trans_c2$samples[,1]) %>% gather(key = "contrast", value = "b") %>% group_by(contrast) %>%  ggplot(aes(x = contrast, y=b)) + stat_halfeye(point_interval = mode_hdi, .width = c(.66, .95)) + geom_hline(yintercept = 0, color = "red") + theme_minimal() + theme(axis.title.x = element_blank(), axis.title.y = element_text(vjust = 0.5), plot.margin = unit(c(.5,.5,.5,.5), "cm"), axis.text.x = element_text(angle=45, hjust=1)) + coord_trans(ylim=c(-20,15)) +  ggtitle("exp6 transfer cycle 2") + ylab(expression("Bayes factor difference between\nsurvial in treatment and control group"))
+
+ggsave("survival/paper_figures/exp6_transfer_cycle2.png", height = 6, width = 5)
+
+
+p7 <- tibble("social contact cycle 3" = hypexp7_trans_c3$samples[,1]) %>% gather(key = "contrast", value = "b") %>% group_by(contrast) %>%  ggplot(aes(x = contrast, y=b)) + stat_halfeye(point_interval = mode_hdi, .width = c(.66, .95)) + geom_hline(yintercept = 0, color = "red") + theme_minimal() + theme(axis.title.x = element_blank(), axis.title.y = element_text(vjust = 0.5), plot.margin = unit(c(.5,.5,.5,.5), "cm"), axis.text.x = element_text(angle=45, hjust=1)) + coord_trans(ylim=c(-20,15)) +  ggtitle("exp7 transfer cycle 3") + ylab(expression("Bayes factor difference between\nsurvial in treatment and control group"))
+
+ggsave("survival/paper_figures/exp7_transfer_cycle3.png", height = 6, width = 5)
+
+
+
+custom.col <- c("#C4961A", "#D16103", "#52854C", "#4E84C4")
+
+
+p_all <- tibble("exp1 exposed guts" = hypexp1$samples[,1],"exp2 filtered guts" = hypexp2_ContrFiltered$samples[,1],"exp3 added\n chlorothalonil" = hypexp3_added$samples[,1],"exp4 added\n chlorothalonil" = hypexp4_added$samples[,1],"exp5 social contact\n cycle 2" = hypexp5_trans_c2$samples[,1],"exp6 social contact\n cycle 1" = hypexp6_trans_c1$samples[,1],"exp6 social contact\n cycle 2" = hypexp6_trans_c2$samples[,1],"exp7 social contact\n cycle 3" = hypexp7_trans_c3$samples[,1]) %>% gather(key = "contrast", value = "b") %>% group_by(contrast) %>%  ggplot(aes(x = contrast, y=b)) + stat_halfeye(aes(fill=contrast),point_interval = mode_hdi, .width = c(.66, .95),alpha=0.5)+ geom_hline(yintercept = 0, color = "red") +scale_fill_manual(values=c("#D45E79","cadetblue","red","#C4961A", "#D16103", "#52854C", "#4E84C4","purple"),guide = guide_legend(override.aes = list(shape = c(rep(15, 7)),size=7)))+ theme_minimal()+theme(axis.text.y = element_text(size=17))+theme(axis.title.x = element_blank(), axis.title.y = element_text(vjust = 0.5, size=16), plot.margin = unit(c(.5,.5,.5,.5), "cm"), axis.text.x = element_text(angle=45, hjust=1, size=18)) + coord_trans(ylim=c(-10,20)) + ylab(expression("Bayes factor survival difference"))+theme(legend.title = element_blank())+theme(legend.text = element_text(size=16,face="bold"))+ theme(legend.position = "none")
+
+ggsave("survival/paper_figures/all_figure_manuscript.png", height = 5.5, width = 10.5)
+
+#+theme(legend.position = "none")
+#Bayes factor difference between\nsurvial in treatment and control group
+```
