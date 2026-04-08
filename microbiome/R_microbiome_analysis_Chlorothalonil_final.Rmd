@@ -1,0 +1,1153 @@
+---
+title: "R_microbiome_analysis_final"
+author: "Vienna"
+date: "4/25/2020"
+output: 
+  pdf_document: default
+  keep_md: true
+  html_document: default
+self_contained: no
+thumbnails: no
+keep_md: yes
+---
+
+```{r setup, include = FALSE}
+library(RSQLite)
+library(parallel)
+library(DECIPHER)
+library(gridExtra)
+library(ggnewscale) ##new_scale()
+library(ggpubr) # ggarrange()
+library(ggthemes)
+library(grid) # rasterGrob()
+library(vegan)
+library(phyloseq)
+library(png)
+library(qgraph) # graph layout
+library(ggsignif)
+library(RColorBrewer)
+library(tidyverse) # includes: ggplot2, dplyr, tidyr, readr, purr, tibble, stringr, forcats
+library(knitr)
+
+knitr::opts_chunk$set(echo = FALSE
+                      , comment = NA
+                      , warning = FALSE
+                      , error = FALSE
+                      , message = FALSE
+                      , tidy = TRUE)
+set.seed(42)
+rm(list = ls())
+
+# Plotting options
+plot_res = 300 # DPI of PNG graphs
+col_cembio <- c(rgb(181, 6, 155, 255, max = 255), rgb(64, 118, 253, 255, max = 255))
+col_c12 <- brewer.pal(12, "Set3")
+theme_set(theme_bw())
+
+# Analysis switches
+do_tech_analysis <- TRUE
+```
+
+
+## Summary
+The experiment aimed to study the response of honey bee microbiome to Chlorothalonil across host generations and to detect potential microbiome mediated effects on host phenotypes. 
+## Methods
+We reared adult bees under controlled lab conditions and inoculated them with a natural bee microbiome (start_pool). Bees were orally stressed with Chloropthalonil or no stressor (control). Three cages per treatment were used. Both, the stress-exposed and control microbiomes were transferred to the next cycle (cage to cage transfer) which was handled as before. The third cycle aims to study effects of the pre-exposed microbiome on phenotypes of naive bee hosts in comparison to control microbiomes. For that we transferred the microbiomes and let them be established in the bee hosts without any stress factor contact. We finally applied high amounts of the chemical to all bees with a control microbiome or a pre-exposed microbiome. Bee samples for 16S sequencing has been snap-frozen after cycle 1, cycle 2, cycle 3 BEFORE high stress and cycle 3 AFTER high stress. In addition, the macerated gut pools for transferring microbiome has been saved (start_microbiome as well as pool from each cage to cage transfer). We sequenced the V3-V4 region of the 16S region. Two DNA mock samples from ZymoResearch have been sequenced and named as "positive_control".
+
+### Data and metadata
+
+Overview over all experimental variables:
+
+**Experimental variables find in metadata file**:  
+
+*sample_type* <- microbiome_transfer or single bee
+*treatment* <- treatment used (control or which toxin) and additional information if microbiome transfer (e.g. Control_transfer), single bee (e.g. Control)
+*treatment2* <- only treatment, not indicating sample type
+*cage* <- cage number (three cages per treatment have been used)
+*treatment_cage* <- combined information of treatment and cage number (e.g. Control_2)
+*date* <- date of sampling during experiment
+*cycle* <- experimental cycle (cycle 1, cycle 2, cycle 3 before stress, cycle 3 after stress)
+*treatment_cycle* <- experimental cycle in combination with treatment information
+*treatment_cycle2*<- experimental cycle in combination with treatment  plus sample type information
+
+
+```{r load}
+
+#read in otu table
+otu_table=read.csv("data_files/Svtab1.csv",sep=",",row.names=1)
+otu_table=as.matrix(otu_table)
+
+#read in taxonomy
+taxonomy=read.csv("data_files/taxonomy2.csv",sep=",",row.names=1)
+taxonomy <- cbind(taxonomy, ASV = paste0("ASV", sprintf("%04d", 1:nrow(taxonomy))))
+taxonomy=as.matrix(taxonomy)
+
+metatable <- read.delim("data_files/metadata_reorder3.txt") 
+#View(metatable)
+row.names(metatable) <- metatable[[1]]
+metatable<- metatable[,(-1)]
+META <- sample_data(metatable)
+
+#import as phyloseq objects
+OTU=otu_table(otu_table,taxa_are_rows=TRUE)
+TAX=tax_table(taxonomy)
+
+sample_names(META) == sample_names(OTU)
+
+#create phyloseq object
+ps1<- phyloseq(OTU, TAX, META)
+
+# change taxonomy header 
+colnames(tax_table(ps1)) <- c(D0 = "Kingdom", D1 = "Phylum", D2 = "Class", 
+                              D3 = "Order", D4 = "Family", D5 = "Genus", D6 = "Species", ASV = "ASV")
+#check
+rank_names(ps1)
+
+#The total number of ASVs in the whole dataset is 
+length(taxa_names(ps1))
+
+#get rid of non-bacterial reads and singletons
+ps1 = subset_taxa(ps1, Kingdom =="Bacteria")
+ps1 <- prune_taxa(taxa_sums(ps1) > 1, ps1)
+ps1<-subset_taxa(ps1, (Order!="Chloroplast"))
+ps1<-subset_taxa(ps1, (Family!="Mitochondria"))
+length(taxa_names(ps1))
+#reduces total taxa numbers from 1717 to 1167 (minus 550)
+
+# mean, max and min of sample read counts
+smin <- min(sample_sums(ps1))
+smean <- mean(sample_sums(ps1))
+smax <- max(sample_sums(ps1))
+# printing the results
+cat("The minimum sample read count is:",smin)
+cat("The average sample read count is:",smean)
+cat("The maximum sample read count is:",smax)
+
+# min 14240 mean 27937max 49370
+
+#build a custom color palette for phyloseq object
+getPalette = colorRampPalette(brewer.pal(12, "Set3"))
+speciesList = unique(tax_table(ps1)[,"Genus"])
+speciesPalette = getPalette(length(speciesList))
+names(speciesPalette) = speciesList
+```
+
+### Plot rarefaction curves
+```{r rarefaction_curve, fig.heigt=12, fig.width=9}
+rare<- ps1
+rare2 = subset_samples(rare, treatment2 != "Mock")
+rare2 = subset_samples(rare2, treatment2 != "hive_bee")
+
+smin <- min(sample_sums(rare2))
+cat("The minimum sample read count is:",smin)
+
+# rarefy without replacement
+set.seed(42)
+ps.rarefied = rarefy_even_depth(rare2, rngseed=1, sample.size=14240, replace=F)
+ps.rarefied
+library(ranacapa)
+cbPalette <- c("#000000", "#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7","maroon","khaki4")
+ggrare(ps.rarefied, step = 100, se = FALSE, color="treatment2")+ scale_colour_manual(values=cbPalette)+geom_line(size=1)+ theme_bw()+theme(axis.line = element_line(colour = "black"))+ theme(legend.title = element_blank(),
+                legend.background = element_blank(),
+                legend.key = element_blank()) + theme(text = element_text(size = 18))+theme(strip.text = element_text(face="bold", size=17))+ theme(axis.title.x=element_blank())+theme(plot.title = element_text(hjust = 0.5, size=18, face="italic"))+theme(legend.text=element_text(size=16))+ylim(20,80)
+#ggsave("microbiome/figures/supp_rarefaction_sub.png", height = 5, width = 12)
+
+ggrare(rare2, step = 100, se = FALSE, color="treatment2")+ scale_colour_manual(values=cbPalette)+geom_line(size=1)+ theme_bw()+theme(axis.line = element_line(colour = "black"))+ theme(legend.title = element_blank(),
+                legend.background = element_blank(),
+                legend.key = element_blank()) + theme(text = element_text(size = 18))+theme(strip.text = element_text(face="bold", size=17))+ theme(axis.title.x=element_blank())+theme(plot.title = element_text(hjust = 0.5, size=18, face="italic"))+theme(legend.text=element_text(size=16))+ylim(20,80)
+#ggsave("microbiome/figures/supp_rarefaction_no_sub.png", height = 5, width = 12)
+```
+
+
+*** Supplementary figure: Rarefaction curves were used as a qualitative method to estimate the species richness as a function of sequencing depth for all samples. Rarefaction curves reached their asymptotes for all samples, suggesting that saturation in sequencing was achieved.
+
+### Positive controls / mock community
+
+The experiment contained two positive control samples with DNA from the ZymoBIOMICS™ Microbial
+Community Standard (Zymo Research).
+
+
+#### Plot taxa in Mock control samples
+
+```{r mock}
+ps_mock <- ps1
+ps_mock <- subset_samples(ps_mock, treatment == "Mock")
+ps_mock <- prune_taxa(taxa_sums(ps_mock) > 0, ps_mock)
+#transform to proportional data
+ps_mock2 <- transform_sample_counts(ps_mock, function(OTU) {OTU / sum(OTU)})
+ps_mock2 <- tax_glom(ps_mock2, taxrank = 'Genus')
+low1pc_reads <- max(taxa_sums(ps_mock2)) * 1 / 100
+low1pc_indices <- which(taxa_sums(ps_mock2) < low1pc_reads)
+length(low1pc_indices)
+taxa_names(ps_mock2)[low1pc_indices[1]] <- "other"
+ps_merge <- merge_taxa(ps_mock2, low1pc_indices, "other")
+tax_table(ps_merge)["other", ] <- c("other")
+
+getPalette = colorRampPalette(brewer.pal(10, "Set3"))
+speciesList = unique(tax_table(ps_merge)[,"Genus"])
+speciesPalette = getPalette(length(speciesList))
+names(speciesPalette) = speciesList
+
+ps_df <- psmelt(ps_merge)
+
+ps_df_sum <- ps_df %>%
+  group_by(Sample,Genus) %>%
+  summarise(Abundance = mean(Abundance)) %>%
+  group_by(Sample) %>%
+  mutate(Relative_abundance = Abundance / sum(Abundance)) %>%
+  ungroup() %>%
+  mutate(Genus = fct_reorder(Genus, Abundance, .fun = sum, .desc = TRUE)) %>%
+  droplevels()
+levels(ps_df_sum$Genus)
+
+mock_plot<-ggplot(data = ps_df_sum, aes(x = Sample, y = Relative_abundance, fill = Genus)) +
+  geom_bar(stat = "identity")+ scale_y_continuous(expand = c(0,0))+ scale_fill_manual(values= speciesPalette)+ylab("relative abundance")
+mock_plot<-mock_plot+ theme(legend.text=element_text(size=9,face="italic"))
+mock_plot<-mock_plot+theme(axis.text.x = element_text(size=12, face="bold"))+ theme(axis.title.x=element_blank())+ theme(legend.title=element_blank())+theme(axis.text.y = element_text(size=12, face="bold"))+ theme(axis.title.y=element_text(size=13, face="bold"))
+mock_plot2<-mock_plot+theme(plot.title = element_text(face = "bold", color="grey40",size = (17)))+theme(plot.title = element_text(hjust = 0.5))
+ps_df_sum
+#ggsave("microbiome/figures/mock.png", height = 3, width = 5)
+```
+
+All 8 Mock bacterial taxa correctly detected. 
+**Figure S1: Comparison of the mock community with the theoretical proportions.**
+The two mock samples sequenced in this study **(A)** show no big difference to the expected
+theoretical proportions of the reference **(B, bar with label *theoretical*)**. The three other bacterial taxa belong to honey bee core microbiome (Bartonella, Gilliamella and Snodgrassella). The relative abundance of these three taxa across the two Mock samples account for 0.23% of all reads, representing neglectable cross-contamination during sequencing.
+
+
+
+#### comparing difference between methods
+We sequenced two types of samples: whole bee abdomen and the mix of three macerated guts for cage to cage transfers after each cycle
+Therefore, we need to test if these samples are different due to the differences in the methods prior extracting before deciding if we include all or not.
+Use PERMANOVA on bray-curtis dissimilarities using proportional transformed abundance data
+```{r}
+set.seed(42)
+methods = ps1
+methods <- transform_sample_counts(methods, function(OTU) {OTU / sum(OTU)})
+
+Control = subset_samples(methods, treatment2 == "Control")
+Control <- prune_taxa(taxa_sums(Control) > 0, Control)
+C_metadata <- as(sample_data(Control), "data.frame")
+adonis2(phyloseq::distance(Control, method="bray") ~ sample_type,data = C_metadata,perm=999)
+
+Chloro = subset_samples(methods, treatment2 == "Chlorothalonil")
+Chloro <- prune_taxa(taxa_sums(Chloro) > 0, Chloro)
+C_metadata <- as(sample_data(Chloro), "data.frame")
+adonis2(phyloseq::distance(Chloro, method="bray") ~ sample_type,data = C_metadata, perm=999)
+```
+No significant difference between gut pools or whole bees and therefore, we continue with analysing them combined
+
+
+##  Alpha diversity 
+
+```{r alpha_Shannon, fig.heigt=13, fig.width=8}
+alpha<- ps1
+#pick cycle 1, 2 and 3 before stress
+alpha1 = subset_samples(alpha, cycle=="cycle_one" | cycle=="cycle_two" | cycle == "cycle_three_before_stress")
+#rarefy to even numbers
+set.seed(1)  
+alpha1_ra <- rarefy_even_depth(alpha1,sample.size=14240, replace=FALSE, rngseed = 1) 
+alpha1_ra<-prune_taxa(taxa_sums(alpha1_ra) > 0, alpha1_ra)
+
+sample_data(alpha1_ra)$cycle<-factor(sample_data(alpha1_ra)$cycle,levels=c("cycle_one","cycle_two","cycle_three_before_stress"), labels=c("Cycle one","Cycle two","Cycle three"))
+levels(sample_data(alpha1_ra)$cycle)
+
+sigFunc = function(x){
+  if(x < 0.001){"***"} 
+  else if(x < 0.01){"**"}
+  else if(x < 0.055){"*"}
+  else{NA}}
+
+alpha_meas = c("Shannon")
+p2 <- plot_richness(alpha1_ra,"treatment2",color="treatment2", measures=alpha_meas)
+p2$layers <- p2$layers[-1]
+p2<-p2 + geom_boxplot(data=p2$data, aes(x=treatment2, y=value),show.legend=FALSE, alpha=0.1)+geom_point(position = position_jitter(w = 0.2, h = 0.1),show.legend=FALSE) +
+  geom_signif(comparisons=list(c("Control", "Chlorothalonil")),tip_length = 0.02,vjust=0.5, color=("grey20"),map_signif_level=sigFunc, y_position = c(3.7,3.7,3.9), margin_top = 0.1, textsize=6, test = wilcox.test)
+p2 <- p2 + guides(fill=guide_legend(title=element_blank()))+ylim(2.3,4)
+p2 <- p2 + theme(plot.title = element_text(hjust = 0.5))+scale_color_manual(values=c("#55596a", "cyan4"))
+p2 <- p2+ theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+ theme(panel.background = element_blank())
+p2 <- p2+theme(axis.line = element_line(colour = "black"))
+p2<- p2 + theme(legend.title = element_blank(),legend.background = element_blank(),legend.key = element_blank()) +ylab("Shannon alpha diversity")
+p2 <- p2+ theme(panel.border = element_blank())
+p2<-p2 + theme(text = element_text(size = 19))+theme(strip.text = element_text(face="bold", size=19, color="gray40"))+ theme(axis.title.x=element_blank())+theme(axis.text.x = element_blank())
+Shannon2<-p2+ facet_grid( ~cycle,scales="free_x")+theme(axis.ticks.x=element_blank())+theme(legend.position="bottom")+theme(strip.background =element_rect(fill="white", color="white"))
+Shannon2<-Shannon2+theme(panel.spacing = unit(1.1, "cm"))
+Shannon2
+#ggsave("microbiome/figures/alpha_Shannon2.png", height = 3.5, width = 6)
+```
+***The Shannon index  captures  information  about  both  the  species  richness  (number  of species) and the relative abundances of the species. Increased Shannon index means increased species diversity.
+
+### make statistical comparisons on Shannon alpha diversity index - comparing treatments against respective controls in each cycle
+
+```{r warning=FALSE}
+alpha<- ps1
+alpha1 = subset_samples(alpha, cycle=="cycle_one" | cycle=="cycle_two" | cycle == "cycle_three_before_stress")
+#rarefy to even numbers
+set.seed(1)  
+alpha1_ra <- rarefy_even_depth(alpha1,sample.size=14240, replace=FALSE, rngseed = 1) 
+alpha1_ra<-prune_taxa(taxa_sums(alpha1_ra) > 0, alpha1_ra)
+
+results = estimate_richness(alpha1_ra, measures = 'Shannon')
+d = sample_data(alpha1_ra)
+
+# calculate wilcox-test
+Control_1 = results[d[,'treatment_cycle'] == 'Control_cycle_1',]
+Chlorothalonil_1 = results[d[,'treatment_cycle'] == 'Chlorothalonil_cycle_1',]
+wilcox.test(Control_1, Chlorothalonil_1)
+#W = 106, p-value = 0.052
+
+#cycle 2
+Control_2 = results[d[,'treatment_cycle'] == 'Control_cycle_2',]
+Chlorothalonil_2 = results[d[,'treatment_cycle'] == 'Chlorothalonil_cycle_2',]
+wilcox.test(Control_2, Chlorothalonil_2)
+#W = 63, p-value = 0.6297
+
+#cycle 3
+control_cycle_3_before_stress = results[d[,'treatment_cycle'] == 'control_Chlorothalonil_cycle_3_before_stress',]
+Chlorothalonil_cycle_3_before_stress = results[d[,'treatment_cycle'] == 'Chlorothalonil_cycle_3_before_stress',]
+wilcox.test(control_cycle_3_before_stress, Chlorothalonil_cycle_3_before_stress)
+#W = 30, p-value = 0.3865
+```
+Under chlorothalonil the Shannon alpha diversity was significantly affected only in cycle 1 
+
+
+```{r alpha_Observed, fig.heigt=13, fig.width=8}
+alpha<- ps1
+#pick cycle 1, 2 and 3 before stress
+alpha1 = subset_samples(alpha, cycle=="cycle_one" | cycle=="cycle_two" | cycle == "cycle_three_before_stress")
+#rarefy to even numbers
+set.seed(1)  
+alpha1_ra <- rarefy_even_depth(alpha1,sample.size=14240, replace=FALSE, rngseed = 1) 
+alpha1_ra<-prune_taxa(taxa_sums(alpha1_ra) > 0, alpha1_ra)
+
+sample_data(alpha1_ra)$cycle<-factor(sample_data(alpha1_ra)$cycle,levels=c("cycle_one","cycle_two","cycle_three_before_stress"), labels=c("Cycle one","Cycle two","Cycle three"))
+levels(sample_data(alpha1_ra)$cycle)
+
+sigFunc = function(x){
+  if(x < 0.001){"***"} 
+  else if(x < 0.01){"**"}
+  else if(x < 0.05){"*"}
+  else{NA}}
+
+alpha_meas2 = c("Observed")
+p2 <- plot_richness(alpha1_ra,"treatment2",color="treatment2", measures=alpha_meas2)
+p2$layers <- p2$layers[-1]
+p2<-p2 + geom_boxplot(data=p2$data, aes(x=treatment2, y=value),show.legend=FALSE, alpha=0.1)+geom_point(position = position_jitter(w = 0.2, h = 0.1),show.legend=FALSE) +
+  geom_signif(comparisons=list(c("Control", "Chlorothalonil")),tip_length = 0.02,vjust=0.5, color=("grey20"),map_signif_level=sigFunc, margin_top = 0.1, textsize=6, test = wilcox.test)
+p2 <- p2 + guides(fill=guide_legend(title=element_blank()))
+p2 <- p2 + theme(plot.title = element_text(hjust = 0.5))+scale_color_manual(values=c("#55596a", "cyan4"))
+p2 <- p2+ theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+ theme(panel.background = element_blank())
+p2 <- p2+theme(axis.line = element_line(colour = "black"))
+p2<- p2 + theme(legend.title = element_blank(),legend.background = element_blank(),legend.key = element_blank()) +ylab("Observed taxa")
+p2 <- p2+ theme(panel.border = element_blank())
+p2<-p2 + theme(text = element_text(size = 19))+theme(strip.text = element_text(face="bold", size=19, color="gray40"))+ theme(axis.title.x=element_blank())#+theme(axis.text.x = element_blank())
+Observed<-p2+ facet_grid( ~cycle,scales="free_x")+theme(axis.ticks.x=element_blank())+theme(legend.position="bottom")+theme(strip.background =element_rect(fill="white", color="white"))
+Observed<-Observed+theme(panel.spacing = unit(1.1, "cm"))
+Observed
+#ggsave("microbiome/figures/alpha_Observed2.png", height = 3.5, width = 6)
+```
+
+*** Supplementary figure Observed alpha diversity
+The observed plot shows the difference in detected OTUs. 
+
+### make statistical comparisons on Observed species numbers - comparing treatments against respective controls in each cycle
+```{r warning=FALSE}
+alpha<- ps1
+alpha1 = subset_samples(alpha, cycle=="cycle_one" | cycle=="cycle_two" | cycle == "cycle_three_before_stress")
+#rarefy to even numbers
+set.seed(1)  
+alpha1_ra <- rarefy_even_depth(alpha1,sample.size=14240, replace=FALSE, rngseed = 1) 
+
+results = estimate_richness(alpha1_ra, measures = 'Observed')
+d = sample_data(alpha1_ra)
+
+# calculate wilcox-test
+Control_1 = results[d[,'treatment_cycle'] == 'Control_cycle_1',]
+Chlorothalonil_1 = results[d[,'treatment_cycle'] == 'Chlorothalonil_cycle_1',]
+wilcox.test(Control_1, Chlorothalonil_1)
+#W = 99, p-value = 0.1227
+
+#cycle 2
+Control_2 = results[d[,'treatment_cycle'] == 'Control_cycle_2',]
+Chlorothalonil_2 = results[d[,'treatment_cycle'] == 'Chlorothalonil_cycle_2',]
+wilcox.test(Control_2, Chlorothalonil_2)
+#W = 55, p-value = 0.3388
+
+#cycle 3
+control_cycle_3_before_stress = results[d[,'treatment_cycle'] == 'control_Chlorothalonil_cycle_3_before_stress',]
+Chlorothalonil_cycle_3_before_stress = results[d[,'treatment_cycle'] == 'Chlorothalonil_cycle_3_before_stress',]
+wilcox.test(control_cycle_3_before_stress, Chlorothalonil_cycle_3_before_stress)
+#W = 24, p-value = 0.1543
+```
+Numbers of observed species is not significantly different under chlorothalonil to the control in all three cycles.
+
+
+
+# Beta diversity
+
+### ordination plots
+```{r NMDS_man, fig.heigt=7.5, fig.width=10}
+ord2<- ps1
+ord2 = subset_samples(ord2, cycle=="cycle_one" | cycle=="cycle_two" | cycle == "cycle_three_before_stress")
+
+ord2 <- transform_sample_counts(ord2, function(OTU) {OTU / sum(OTU)})
+sample_data(ord2)$cycle<-factor(sample_data(ord2)$cycle,levels=c("cycle_one","cycle_two", "cycle_three_before_stress"), labels=c("Cycle one","Cycle two","Cycle three"))
+levels(sample_data(ord2)$cycle)
+
+ord2 <- prune_taxa(taxa_sums(ord2) > 0, ord2)
+set.seed(42)
+dist<-phyloseq::distance(ord2, method="bray") 
+ordination = ordinate(ord2, method="NMDS", distance=dist)
+cat("stress is:", ordination$stress)
+p2 <- plot_ordination(ord2, ordination, color="treatment2") +geom_point(size=2.5)
+p2 <- p2 + guides(fill=guide_legend(title=element_blank()))
+p2 <- p2 + theme(plot.title = element_text(hjust = 0.5))+scale_color_manual(values=c("#55596a", "cyan4"),guide = guide_legend(override.aes = list(shape = c(rep(15, 2)),size=7,alpha=0.5)))
+p2 <- p2+ theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+ theme(panel.background = element_blank())
+p2 <- p2+theme(axis.line = element_line(colour = "black"))
+p2<- p2 + theme(legend.title = element_blank(),legend.background = element_blank(),legend.key = element_blank())
+p2 <- p2+ theme(panel.border = element_blank())
+p2<-p2 + theme(text = element_text(size = 19))+theme(strip.text = element_blank())
+p2<-p2+ facet_wrap( ~cycle,scales="free_x")+theme(legend.position="bottom")+theme(strip.background =element_rect(fill="white", color="white"))
+NMDS_main<-p2+stat_ellipse(aes(group = treatment2),size=1.1, alpha=0.5)+ theme(panel.spacing.x=unit(5.5, "lines"))+ theme(axis.title.y = element_text(margin = margin(t = 0, r = 0, b = 0, l = 20)))+ scale_x_continuous(limits = c(-1.1, 1), breaks = seq(-1, 1, by = 1))
+NMDS_main
+#ggsave("microbiome/figures/NMDS_man.png", height = 5, width = 10)
+
+#stress is: 0.1224216
+#(<0.2 is good)
+```
+
+```{r PCoA, fig.heigt=7.5, fig.width=10}
+ord2<- ps1
+ord2 = subset_samples(ord2, cycle=="cycle_one" | cycle=="cycle_two" | cycle == "cycle_three_before_stress")
+
+ord2 <- transform_sample_counts(ord2, function(OTU) {OTU / sum(OTU)})
+sample_data(ord2)$cycle<-factor(sample_data(ord2)$cycle,levels=c("cycle_one","cycle_two", "cycle_three_before_stress"), labels=c("Cycle one","Cycle two","Cycle three"))
+levels(sample_data(ord2)$cycle)
+
+ord2 <- prune_taxa(taxa_sums(ord2) > 0, ord2)
+set.seed(42)
+dist<-phyloseq::distance(ord2, method="bray") 
+ordination2 = ordinate(ord2, method="PCoA", distance=dist)
+p3 <- plot_ordination(ord2, ordination2, color="treatment2") +geom_point(size=2.5)
+p3 <- p3 + guides(fill=guide_legend(title=element_blank()))
+p3 <- p3 + theme(plot.title = element_text(hjust = 0.5))+scale_color_manual(values=c("#55596a", "cyan4"),guide = guide_legend(override.aes = list(shape = c(rep(15, 2)),size=7,alpha=0.5)))
+p3 <- p3+ theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+ theme(panel.background = element_blank())
+p2 <- p2+theme(axis.line = element_line(colour = "black"))
+p2<- p2 + theme(legend.title = element_blank(),legend.background = element_blank(),legend.key = element_blank())
+p2 <- p2+ theme(panel.border = element_blank())
+p2<-p2 + theme(text = element_text(size = 16.5))+theme(strip.text = element_blank())
+p2<-p2+ facet_wrap( ~cycle,scales="free_x")+theme(legend.position="bottom")+theme(strip.background =element_rect(fill="white", color="white"))
+PCoA_main<-p2+stat_ellipse(aes(group = treatment2),size=1.1, alpha=0.5)+ theme(panel.spacing.x=unit(5.5, "lines"))+ theme(axis.title.y = element_text(margin = margin(t = 0, r = 0, b = 0, l = 20)))+ scale_x_continuous(limits = c(-0.6, 0.45), breaks = seq(-0.6, 0.4, by = 0.5))
+PCoA_main
+#ggsave("microbiome/figures/PCoA.png", height = 5, width = 10)
+```
+
+
+## Beta diversity stats
+
+#### test difference between treatments and respective controls in the three cycles to statistically verify microbial community compositional difference seen in ordination plots 
+```{r}
+set.seed(42)
+compare=ps1
+compare1 <- transform_sample_counts(compare, function(OTU) {OTU / sum(OTU)})
+
+cycle1 = subset_samples(compare1, cycle == "cycle_one")
+cycle1 <- prune_taxa(taxa_sums(cycle1) > 0, cycle1)
+cycle1.1 <- as(sample_data(cycle1), "data.frame")
+
+cycle2 = subset_samples(compare1, cycle == "cycle_two")
+cycle2 <- prune_taxa(taxa_sums(cycle2) > 0, cycle2)
+cycle2.1 <- as(sample_data(cycle2), "data.frame")
+
+cycle3b = subset_samples(compare1, cycle == "cycle_three_before_stress")
+cycle3b <- prune_taxa(taxa_sums(cycle3b) > 0, cycle3b)
+cycle3b.1 <- as(sample_data(cycle3b), "data.frame")
+
+#cycle 1
+
+subs <- subset_samples(cycle1, treatment2 %in% c("Control", "Chlorothalonil"))
+metadata <- as(sample_data(subs), "data.frame")
+adonis2(phyloseq::distance(subs, method="bray") ~ treatment2,data = metadata, perm=999)
+#p=0.234
+#cycle 2
+
+subs <- subset_samples(cycle2, treatment2 %in% c("Control", "Chlorothalonil"))
+metadata <- as(sample_data(subs), "data.frame")
+adonis2(phyloseq::distance(subs, method="bray") ~ treatment2,data = metadata, perm=999)
+#p=0.5
+
+#cycle 3 before stress
+
+subs <- subset_samples(cycle3b, treatment2 %in% c("Control", "Chlorothalonil"))
+metadata <- as(sample_data(subs), "data.frame")
+adonis2(phyloseq::distance(subs, method="bray") ~ treatment2,data = metadata, perm=999)
+#p=0.133
+```
+Community composition was not significantly affected under Chlorothalonil in all cycles. 
+
+
+### Test for cage effects
+```{r cage_effects}
+set.seed(42)
+
+cycle1_co = subset_samples(cycle1, treatment2 == "Control")
+cycle1_co.1 <- as(sample_data(cycle1_co), "data.frame")
+d = phyloseq::distance(cycle1_co, "bray")
+adonis2(d ~ cage, cycle1_co.1, perm=999)
+#p=0.5
+
+cycle1_ch = subset_samples(cycle1, treatment2 == "Chlorothalonil")
+cycle1_ch.1 <- as(sample_data(cycle1_ch), "data.frame")
+d = phyloseq::distance(cycle1_ch, "bray")
+adonis2(d ~ cage, cycle1_ch.1, perm=999)
+#p=0.35
+
+#cycle2
+
+cycle2_control = subset_samples(cycle2, treatment2 == "Control")
+cycle2_control.1 <- as(sample_data(cycle2_control), "data.frame")
+d = phyloseq::distance(cycle2_control, "bray")
+adonis2(d ~ cage, cycle2_control.1, perm=999)
+#p<0.001
+
+cycle2_ch = subset_samples(cycle2, treatment2 == "Chlorothalonil")
+cycle2_ch.1 <- as(sample_data(cycle2_ch), "data.frame")
+d = phyloseq::distance(cycle2_ch, "bray")
+adonis2(d ~ cage, cycle2_ch.1, perm=999)
+#p=0.37
+
+#cycle 3 before stress
+
+cycle3_control = subset_samples(cycle3b, treatment2 == "Control")
+cycle3_control.1 <- as(sample_data(cycle3_control), "data.frame")
+d = phyloseq::distance(cycle3_control, "bray")
+adonis2(d ~ cage, cycle3_control.1, perm=999)
+#p=0.32
+
+cycle3_ch = subset_samples(cycle3b, treatment2 == "Chlorothalonil")
+cycle3_ch.1 <- as(sample_data(cycle3_ch), "data.frame")
+d = phyloseq::distance(cycle3_ch, "bray")
+adonis2(d ~ cage, cycle3_ch.1, perm=999)
+#p=0.32
+
+#cage differences general (across all cycles)
+ord2<- ps1
+all = subset_samples(ord2, cycle=="cycle_one" | cycle=="cycle_two" | cycle == "cycle_three_before_stress")
+all <- prune_taxa(taxa_sums(all) > 0, all)
+all1 <- as(sample_data(all), "data.frame")
+d = phyloseq::distance(all, "bray")
+adonis2(d ~ treatment_cage, all1, perm=999)
+#p=0.06
+```
+
+Testing if the three cages within a treatment show significant variations in microbiome composition (cage effects). Only in cycle 2 of the control are significant cage effects visible.
+
+
+### Time effect
+#### Test if microbial composition of treatments differ across the three cycles
+
+```{r}
+set.seed(42)
+compare = ps1
+compare2 <- prune_taxa(taxa_sums(compare) > 0, compare)
+compare2 <- transform_sample_counts(compare2, function(OTU) {OTU / sum(OTU)})
+
+subs1 <- subset_samples(compare2, treatment_cycle == "Control_cycle_1"|treatment_cycle=="Control_cycle_2"|treatment_cycle=="control_cycle_3_before_stress")
+metadata <- as(sample_data(subs1), "data.frame")
+adonis2(phyloseq::distance(subs1, method="bray") ~ cycle,
+       data = metadata, perm=999)
+#p=0.01
+
+subs4 <- subset_samples(compare2, treatment_cycle %in% c("Chlorothalonil_cycle_1", "Chlorothalonil_cycle_2","Chlorothalonil_cycle_3_before_stress"))
+metadata <- as(sample_data(subs4), "data.frame")
+adonis2(phyloseq::distance(subs4, method="bray") ~ cycle,
+       data = metadata, perm=999)
+#p=0.001
+```
+
+Treatments differ significantly across cycles
+
+#### compare treatments before and after high stress
+
+```{r}
+set.seed(42)
+compare2 = ps1
+compare2 <- transform_sample_counts(compare2, function(OTU) {OTU / sum(OTU)})
+
+subs1 <- subset_samples(compare2, treatment_cycle %in% c("control_Chlorothalonil_cycle_3_before_stress", "control_Chlorothalonil_cycle_3_after_stress"))
+metadata <- as(sample_data(subs1), "data.frame")
+adonis2(phyloseq::distance(subs1, method="bray") ~ treatment_cycle,data = metadata, perm=999)
+#p=0.22
+
+subs1 <- subset_samples(compare2, treatment_cycle %in% c("Chlorothalonil_cycle_3_before_stress", "Chlorothalonil_cycle_3_after_stress"))
+metadata <- as(sample_data(subs1), "data.frame")
+adonis2(phyloseq::distance(subs1, method="bray") ~ treatment_cycle,data = metadata, perm=999)
+#p=0.22
+```
+
+No significant difference for any treatment before and after high stress application
+
+
+### test spread of variance of groups
+```{r betadisp}
+set.seed(53)
+test<-ps1
+test2 <- transform_sample_counts(test, function(OTU) {OTU / sum(OTU)})
+
+cycle1 = subset_samples(test2, cycle == "cycle_one")
+cycle1 <- prune_taxa(taxa_sums(cycle1) > 0, cycle1)
+
+cycle2 = subset_samples(test2, cycle == "cycle_two")
+cycle2 <- prune_taxa(taxa_sums(cycle2) > 0, cycle2)
+
+cycle3_b = subset_samples(test2, cycle == "cycle_three_before_stress")
+cycle3_b <- prune_taxa(taxa_sums(cycle3_b) > 0, cycle3_b)
+
+#testing treatment
+set.seed(53)
+d_cycle1 = phyloseq::distance(cycle1, "bray")
+df_cycle1 = as(sample_data(cycle1), "data.frame")
+groups <- df_cycle1[["treatment2"]]
+beta <- betadisper(d_cycle1, df_cycle1$treatment2)
+permutest(beta,pairwise = TRUE, permutations = 999)
+anova(betadisper(d_cycle1, groups))
+mod.HSD <- TukeyHSD(beta,conf.level = 0.95)
+mod.HSD
+plot(betadisper(d_cycle1, groups),main="MultiVariate Permutation Cycle one",lwd=2, label = TRUE,label.cex = 0.9,col=c("#55596a","cyan4"))
+boxplot(betadisper(d_cycle1, groups),main="Cycle one",border=c("#55596a","cyan4"),xlab="")
+
+set.seed(53)
+d_cycle2 = phyloseq::distance(cycle2, "bray")
+df_cycle2 = as(sample_data(cycle2), "data.frame")
+groups <- df_cycle2[["treatment2"]]
+beta <- betadisper(d_cycle2, df_cycle2$treatment2)
+permutest(beta,pairwise = TRUE, permutations = 999)
+anova(betadisper(d_cycle2, groups))
+mod.HSD <- TukeyHSD(beta)
+mod.HSD
+plot(betadisper(d_cycle2, groups),main="MultiVariate Permutation Cycle two",lwd=2, label = TRUE,label.cex = 0.9,col=c("#55596a","cyan4"))
+boxplot(betadisper(d_cycle2, groups),main="Cycle two",border=c("#55596a","cyan4"),xlab="")
+
+set.seed(53)
+d_cycle3_b = phyloseq::distance(cycle3_b, "bray")
+df_cycle3_b = as(sample_data(cycle3_b), "data.frame")
+groups <- df_cycle3_b[["treatment2"]]
+beta <- betadisper(d_cycle3_b, df_cycle3_b$treatment2)
+permutest(beta,pairwise = TRUE, permutations = 999)
+anova(betadisper(d_cycle3_b, groups))
+mod.HSD <- TukeyHSD(beta)
+mod.HSD
+plot(betadisper(d_cycle3_b, groups),main="MultiVariate Permutation Cycle three",lwd=2, label = TRUE,label.cex = 0.9,col=c("#55596a","cyan4"))
+boxplot(betadisper(d_cycle3_b, groups),main="Cycle three",border=c("#55596a","cyan4"),xlab="")
+```
+
+# Taxonomy plots and stats
+
+```{r set_up_for_taxa_plots}
+tax <-ps1
+tax = subset_samples(tax, treatment != "positive_control")
+ps_bdiv2 <- transform_sample_counts(tax, function(OTU) {OTU / sum(OTU)})
+tax_all2<- ps_bdiv2
+ps_pd2 <- tax_glom(tax_all2, taxrank = 'Genus')
+
+low1pc_reads <- max(taxa_sums(ps_pd2)) * 1 / 100
+low1pc_indices <- which(taxa_sums(ps_pd2) < low1pc_reads)
+length(low1pc_indices)
+taxa_names(ps_pd2)[low1pc_indices[1]] <- "other"
+taxa3 <- merge_taxa(ps_pd2, low1pc_indices, "other")
+tax_table(taxa3)["other", ] <- c("other")
+
+#build a custom color palette for phyloseq object
+getPalette = colorRampPalette(brewer.pal(8, "Set3"))
+speciesList = unique(tax_table(taxa3)[,"Genus"])
+speciesPalette = getPalette(length(speciesList))
+names(speciesPalette) = speciesList
+```
+
+
+```{r taxa_cycle1}
+
+ps2 <-taxa3
+cycle1 = subset_samples(ps2, cycle=="cycle_one")
+cycle1 <- prune_taxa(taxa_sums(cycle1) > 0, cycle1)
+
+ps_df_c1 <- psmelt(cycle1)
+ps_df_sum_c1 <- ps_df_c1 %>%
+  group_by(treatment2,Genus,cycle,Sample) %>%
+  summarise(Abundance = mean(Abundance)) %>%
+  group_by(cycle,treatment2,Sample) %>%
+  mutate(relative_abundance = Abundance / sum(Abundance)) %>%
+  ungroup() %>%
+  mutate(Genus = fct_reorder(Genus, Abundance, .fun = sum, .desc = TRUE))
+levels(ps_df_sum_c1$Genus)
+
+change <- c("Cycle one")
+ps_df_sum_c1 <- arrange(transform(ps_df_sum_c1, cycle=factor(cycle,labels=change)),cycle)
+
+ps_df_sum_c1$Sample <- factor(ps_df_sum_c1$Sample, levels = unique(ps_df_sum_c1$Sample[order(ps_df_sum_c1$treatment2)]))
+
+p<-ggplot(data = ps_df_sum_c1, aes(x = Sample, y = relative_abundance, fill = Genus)) +
+  geom_bar(stat = "identity")+ scale_fill_manual(values= speciesPalette)+ scale_y_continuous(expand = c(0,0))+ylab("relative abundance")
+p<-p+ theme(legend.text=element_text(size=18, face = "italic"))+theme(legend.key = element_rect(color = NA, fill = NA),
+                                                     legend.key.size = unit(0.9, "cm"))+theme(legend.title = element_blank())+theme(axis.ticks.x = element_blank())
+p<-p + facet_grid(cycle~treatment2, scales="free_x",space="free_x")
+p<-p + theme(strip.text = element_text(size=18,face="bold",color="grey35"))
+cycle1_plot<-p+theme(axis.title.y = element_text(size=17, face="bold"))+theme(axis.text.y = element_text(size=15, face="bold"))+theme(axis.text.x = element_text(size=11, face="bold", angle = 90))+theme(axis.title.x = element_blank())+theme(strip.background =element_rect(fill="white",color="white"))+theme(axis.text.x = element_blank())+theme(legend.position="bottom")
+#ggsave("microbiome/figures/cycle1_plot.png", height = 6, width = 10)
+```
+
+```{r taxa_cycle2}
+
+ps2 <-taxa3
+cycle2 = subset_samples(ps2, cycle=="cycle_two")
+cycle2 <- prune_taxa(taxa_sums(cycle2) > 0, cycle2)
+
+ps_df_c2 <- psmelt(cycle2)
+ps_df_sum_c2 <- ps_df_c2 %>%
+  group_by(treatment2,Genus,cycle,Sample) %>%
+  summarise(Abundance = mean(Abundance)) %>%
+  group_by(cycle,treatment2,Sample) %>%
+  mutate(relative_abundance = Abundance / sum(Abundance)) %>%
+  ungroup() %>%
+  mutate(Genus = fct_reorder(Genus, Abundance, .fun = sum, .desc = TRUE))
+levels(ps_df_sum_c2$Genus)
+
+change <- c("Cycle two")
+ps_df_sum_c2 <- arrange(transform(ps_df_sum_c2, cycle=factor(cycle,labels=change)),cycle)
+
+ps_df_sum_c2$Sample <- factor(ps_df_sum_c2$Sample, levels = unique(ps_df_sum_c2$Sample[order(ps_df_sum_c2$treatment2)]))
+
+p<-ggplot(data = ps_df_sum_c2, aes(x = Sample, y = relative_abundance, fill = Genus)) +
+  geom_bar(stat = "identity")+ scale_fill_manual(values= speciesPalette)+ scale_y_continuous(expand = c(0,0))+ylab("relative abundance")
+p<-p+ theme(legend.text=element_text(size=18, face = "italic"))+theme(legend.key = element_rect(color = NA, fill = NA),
+                                                     legend.key.size = unit(0.9, "cm"))+theme(legend.title = element_blank())
+#p<-p + facet_wrap(cycle~treatment3, scales="free_x",nrow = 1)
+p<-p + facet_grid(cycle~treatment2, scales="free_x",space="free_x")
+p<-p + theme(strip.text = element_text(size=18,face="bold",color="grey35"))
+cycle2_plot<-p+theme(axis.title.y = element_text(size=18, face="bold"))+theme(axis.text.y = element_text(size=15, face="bold"))+theme(axis.text.x = element_text(size=11, face="bold", angle = 90))+theme(axis.title.x = element_blank())+theme(axis.text.x = element_text(vjust = 0.5,hjust=1))+theme(strip.background =element_rect(fill="white",color="white"))+theme(legend.position="bottom")+ theme(axis.text.x = element_text(hjust = -0.2))+theme(axis.text.x = element_blank())+theme(axis.ticks.x = element_blank())
+#ggsave("microbiome/figures/cycle2_plot.png", height = 6, width = 10)
+```
+
+
+```{r taxa_cycle3}
+
+ps2 <-taxa3
+cycle3 = subset_samples(ps2, cycle=="cycle_three_before_stress")
+cycle3 <- prune_taxa(taxa_sums(cycle3) > 0, cycle3)
+
+ps_df_c3 <- psmelt(cycle3)
+ps_df_sum_c3 <- ps_df_c3 %>%
+  group_by(treatment2,Genus,cycle,Sample) %>%
+  summarise(Abundance = mean(Abundance)) %>%
+  group_by(cycle,treatment2,Sample) %>%
+  mutate(relative_abundance = Abundance / sum(Abundance)) %>%
+  ungroup() %>%
+  mutate(Genus = fct_reorder(Genus, Abundance, .fun = sum, .desc = TRUE))
+levels(ps_df_sum_c3$Genus)
+
+change <- c("Cycle three")
+ps_df_sum_c3 <- arrange(transform(ps_df_sum_c3, cycle=factor(cycle,labels=change)),cycle)
+
+ps_df_sum_c3$Sample <- factor(ps_df_sum_c3$Sample, levels = unique(ps_df_sum_c3$Sample[order(ps_df_sum_c3$treatment2)]))
+
+p<-ggplot(data = ps_df_sum_c3, aes(x = Sample, y = relative_abundance, fill = Genus)) +
+  geom_bar(stat = "identity")+ scale_fill_manual(values= speciesPalette)+ scale_y_continuous(expand = c(0,0))+ylab("relative abundance")
+p<-p+ theme(legend.text=element_text(size=18, face = "italic"))+theme(legend.key = element_rect(color = NA, fill = NA),
+                                                     legend.key.size = unit(0.7, "cm"))+theme(legend.title = element_blank())
+#p<-p + facet_wrap(cycle~treatment3, scales="free_x",nrow = 1)
+p<-p + facet_grid(cycle~treatment2, scales="free_x",space="free_x")
+p<-p + theme(strip.text = element_text(size=18,face="bold",color="grey35"))
+cycle3_plot<-p+theme(axis.title.y = element_text(size=17, face="bold"))+theme(axis.text.y = element_text(size=15, face="bold"))+theme(axis.text.x = element_text(size=11, face="bold", angle = 90))+theme(axis.title.x = element_blank())+theme(axis.text.x = element_text(vjust = 0.5,hjust=1))+theme(strip.background =element_rect(fill="white",color="white"))+theme(legend.position="bottom")+ theme(axis.text.x = element_text(hjust = -0.2))+theme(axis.text.x = element_blank())+theme(axis.ticks.x = element_blank())
+#ggsave("microbiome/figures/cycle3_plot.png", height = 6, width = 10)
+```
+
+
+# microbiome in bees cycle 3 after high stress application 
+```{r taxa_cycle3_after_stress}
+
+ps2 <-taxa3
+cycle3.2 = subset_samples(ps2, cycle=="cycle_three_after_stress")
+cycle3.2 <- prune_taxa(taxa_sums(cycle3.2) > 0, cycle3.2)
+
+ps_df_c3 <- psmelt(cycle3.2)
+ps_df_sum_c3 <- ps_df_c3 %>%
+  group_by(treatment2,Genus,cycle,Sample) %>%
+  summarise(Abundance = mean(Abundance)) %>%
+  group_by(cycle,treatment2,Sample) %>%
+  mutate(relative_abundance = Abundance / sum(Abundance)) %>%
+  ungroup() %>%
+  mutate(Genus = fct_reorder(Genus, Abundance, .fun = sum, .desc = TRUE))
+levels(ps_df_sum_c3$Genus)
+
+change <- c("Control","Chlorothalonil")
+ps_df_sum_c3 <- arrange(transform(ps_df_sum_c3,treatment2=factor(treatment2,labels=change)),treatment2)
+
+p<-ggplot(data = ps_df_sum_c3, aes(x = Sample, y = relative_abundance, fill = Genus)) +
+  geom_bar(stat = "identity")+ scale_fill_manual(values= speciesPalette)+ scale_y_continuous(expand = c(0,0))+ylab("relative abundance")
+p<-p+ theme(legend.text=element_text(size=18, face = "italic"))+theme(legend.key = element_rect(color = NA, fill = NA),
+                                                     legend.key.size = unit(0.7, "cm"))+theme(legend.title = element_blank())
+p<-p + facet_grid(~treatment2, scales="free_x",space="free_x")
+p<-p + theme(strip.text = element_text(size=18,face="bold",color="grey35"))
+cycle3_plot_after<-p+theme(axis.title.y = element_text(size=17, face="bold"))+theme(axis.text.y = element_text(size=15, face="bold"))+theme(axis.text.x = element_text(size=11, face="bold", angle = 90))+theme(axis.title.x = element_blank())+theme(axis.text.x = element_text(vjust = 0.5,hjust=1))+theme(strip.background =element_rect(fill="white",color="white"))+theme(legend.position="bottom")+ theme(axis.text.x = element_text(hjust = -0.2))+theme(axis.text.x = element_blank())+theme(axis.ticks.x = element_blank())
+#ggsave("microbiome/figures/cycle3_after_plot.png", height = 6, width = 9)
+```
+#nurse bees from same hive as natural control
+```{r taxa_nurse}
+
+ps2 <-taxa3
+nurse = subset_samples(ps2, treatment=="hive_bee")
+nurse <- prune_taxa(taxa_sums(nurse) > 0, nurse)
+
+ps_df_c3 <- psmelt(nurse)
+ps_df_sum_c3 <- ps_df_c3 %>%
+  group_by(Genus,Sample) %>%
+  summarise(Abundance = mean(Abundance)) %>%
+  group_by(Sample) %>%
+  mutate(relative_abundance = Abundance / sum(Abundance)) %>%
+  ungroup() %>%
+  mutate(Genus = fct_reorder(Genus, Abundance, .fun = sum, .desc = TRUE))
+levels(ps_df_sum_c3$Genus)
+
+p<-ggplot(data = ps_df_sum_c3, aes(x = Sample, y = relative_abundance, fill = Genus)) +
+  geom_bar(stat = "identity")+ scale_fill_manual(values= speciesPalette)+ scale_y_continuous(expand = c(0,0))+ylab("relative abundance")
+p<-p+ theme(legend.text=element_text(size=13, face = "italic"))+theme(legend.key = element_rect(color = NA, fill = NA),
+                                                     legend.key.size = unit(0.55, "cm"))+theme(legend.title = element_blank())
+nurse<-p+theme(axis.title.y = element_text(size=15, face="bold"))+theme(axis.text.y = element_text(size=13, face="bold"))+theme(axis.title.x = element_blank())+theme(axis.text.x = element_text(vjust = 0.5,hjust=1))+theme(axis.text.x = element_blank())+theme(axis.ticks.x = element_blank())
+#ggsave("microbiome/figures/nurse.png", height = 3.5, width = 6)
+```
+
+## Core taxa abundance
+
+#extract core taxa (rarefy to even depth) and plot abundance across treatments and cycles
+
+```{r total abundance}
+ps2 <-ps1
+ps2 <- rarefy_even_depth(ps2,sample.size=14240, replace=FALSE, rngseed = 1) 
+ps2 = subset_samples(ps2, cycle == "cycle_one"| cycle == "cycle_two"| cycle == "cycle_three_before_stress")
+ps3 <- prune_taxa(taxa_sums(ps2) > 0, ps2)
+ps3 <- tax_glom(ps3, taxrank = 'Genus')
+psOrd3 = subset_taxa(ps3, Genus=="Lactobacillus" | Genus=="Bartonella" | Genus=="Gilliamella" | Genus=="Snodgrassella" | Genus=="Frischella" | Genus=="Bifidobacterium" | Genus=="Commensalibacter")
+
+#Melt and plot
+melt<-psmelt(psOrd3)
+levels2=c("cycle_one","cycle_two","cycle_three_before_stress")
+change <- c("Cycle one","Cycle two","Cycle three")
+melt2 <- arrange(transform(melt, cycle=factor(cycle,levels=levels2,labels=change)),cycle)
+neworder2 <- c("Bartonella","Lactobacillus","Gilliamella","Snodgrassella","Bifidobacterium","Commensalibacter","Frischella")
+melt4 <- arrange(transform(melt2, Genus=factor(Genus,levels=neworder2)),Genus)
+
+a_mean <- melt4 %>% 
+  group_by(treatment2,Genus,cycle) %>% 
+  summarize(mean_val = mean(Abundance))
+a_mean2<-subset(a_mean, treatment2 =="Control")
+print(a_mean2)
+
+sigFunc = function(x){
+  if(x < 0.001){"***"} 
+  else if(x < 0.01){"**"}
+  else if(x < 0.05){"*"}
+  else{NA}}
+
+p<-ggplot(data = melt4, aes(x = treatment2, y = Abundance)) +
+  geom_boxplot(aes(fill=Genus),alpha=0.5,lwd=0.7, position = position_dodge(width = 0.3), width=0.45,outlier.shape = NA) + geom_jitter(aes(color = Genus), height = 0, width = .1)+geom_hline(data= a_mean2, aes(yintercept=mean_val), width=5,size=1,linetype="dashed")+
+  labs(x = "", y = "Abundance\n")+
+  facet_grid(Genus~cycle, scales = "free")+theme_bw()+
+  geom_signif(comparisons=list(c("Control", "Chlorothalonil")),tip_length = 0.03,vjust=1.3, color="grey20", size=1.1,map_signif_level=sigFunc, textsize=9, test = wilcox.test,step_increase = 0.2)
+p<-p+ theme(legend.position="right")+ylab("Total abundance")
+p<-p+ theme(legend.text=element_text(size=29, face = "italic"))+theme(legend.key = element_rect(color = NA, fill = NA),legend.key.size = unit(0.9, "cm"))+theme(legend.title = element_blank())
+abu<-p +theme(strip.text.x = element_text(size=25,face="bold",color = "grey 35"))+theme(strip.background =element_rect(fill="white", color="white"))
+cycle<-abu+theme(axis.title.y = element_text(size=25, face="bold"))+theme(axis.text.y = element_text(size=20, face="bold"))+theme(axis.text.x = element_text(size=25, angle=90,face="bold"))+theme(axis.title.x = element_blank())+ theme(strip.text.y = element_blank())
+#ggsave("microbiome/figures/core_total_abundance.png", height = 20, width = 14)
+``` 
+
+### stats on abundances
+
+### compare if core taxa abundances are significantly different between controls and treatments in cycle 1, 2 and cycle 3, use Wilcoxon tests. 
+
+```{r, lactobacillus_differ}
+set.seed(42)
+ps2 <-ps1
+ps2 <- rarefy_even_depth(ps2,sample.size=14240, replace=FALSE, rngseed = 1) 
+ps2 = subset_samples(ps2, cycle == "cycle_one"| cycle == "cycle_two"| cycle == "cycle_three_before_stress")
+ps3 <- prune_taxa(taxa_sums(ps2) > 0, ps2)
+abundance <- tax_glom(ps3, taxrank = 'Genus')
+Lac = subset_taxa(abundance, Genus=="Lactobacillus")
+
+#cycle 1
+Chl <- subset_samples(Lac, treatment_cycle =="Control_cycle_1" | treatment_cycle =="Chlorothalonil_cycle_1")
+Chl <- prune_taxa(taxa_sums(Chl) > 0, Chl)
+melt<-psmelt(Chl)
+wilcox.test(Abundance~treatment2, data=melt)
+#W = 58, p-value = 0.4428
+
+#cycle 2
+Chl2 <- subset_samples(Lac, treatment_cycle =="Control_cycle_2" | treatment_cycle =="Chlorothalonil_cycle_2")
+Chl2 <- prune_taxa(taxa_sums(Chl2) > 0, Chl2)
+melt2<-psmelt(Chl2)
+wilcox.test(Abundance~treatment2, data=melt2)
+#W = 83, p-value = 0.5512
+
+#cycle 3
+Tet <- subset_samples(Lac, treatment_cycle=="Chlorothalonil_cycle_3_before_stress"|treatment_cycle=="control_Chlorothalonil_cycle_3_before_stress")
+Tet <- prune_taxa(taxa_sums(Tet) > 0, Tet)
+melt3<-psmelt(Tet)
+wilcox.test(Abundance~treatment2, data=melt3)
+#W = 42, p-value = 0.9314
+```
+
+```{r, Bartonella_differ}
+Bart = subset_taxa(abundance, Genus=="Bartonella")
+
+#cycle 1
+Chl <- subset_samples(Bart, treatment_cycle =="Control_cycle_1" | treatment_cycle =="Chlorothalonil_cycle_1")
+Chl <- prune_taxa(taxa_sums(Chl) > 0, Chl)
+melt<-psmelt(Chl)
+wilcox.test(Abundance~treatment2, data=melt)
+#W = 83, p-value = 0.5512
+
+#cycle 2
+Chl2 <- subset_samples(Bart, treatment_cycle =="Control_cycle_2" | treatment_cycle =="Chlorothalonil_cycle_2")
+Chl2 <- prune_taxa(taxa_sums(Chl2) > 0, Chl2)
+melt2<-psmelt(Chl2)
+wilcox.test(Abundance~treatment2, data=melt2)
+#W = 58, p-value = 0.4428
+
+#cycle 3
+Tet <- subset_samples(Bart, treatment_cycle=="Chlorothalonil_cycle_3_before_stress"|treatment_cycle=="control_Chlorothalonil_cycle_3_before_stress")
+Tet <- prune_taxa(taxa_sums(Tet) > 0, Tet)
+melt3<-psmelt(Tet)
+wilcox.test(Abundance~treatment2, data=melt3)
+#W = 34, p-value = 0.6048
+```
+#### Gilliamella
+```{r,Gilliamella_abund}
+Gil = subset_taxa(abundance, Genus=="Gilliamella")
+
+Chl <- subset_samples(Gil, treatment_cycle =="Control_cycle_1" | treatment_cycle =="Chlorothalonil_cycle_1")
+Chl <- prune_taxa(taxa_sums(Chl) > 0, Chl)
+melt<-psmelt(Chl)
+wilcox.test(Abundance~treatment2, data=melt)
+#W = 107, p-value = 0.0449
+
+#cycle 2
+Chl2 <- subset_samples(Gil, treatment_cycle =="Control_cycle_2" | treatment_cycle =="Chlorothalonil_cycle_2")
+Chl2 <- prune_taxa(taxa_sums(Chl2) > 0, Chl2)
+melt2<-psmelt(Chl2)
+wilcox.test(Abundance~treatment2, data=melt2)
+#W = 79, p-value = 0.7074
+
+#cycle 3
+Tet <- subset_samples(Gil, treatment_cycle=="Chlorothalonil_cycle_3_before_stress"|treatment_cycle=="control_Chlorothalonil_cycle_3_before_stress")
+Tet <- prune_taxa(taxa_sums(Tet) > 0, Tet)
+melt3<-psmelt(Tet)
+wilcox.test(Abundance~treatment2, data=melt3)
+#W = 33, p-value = 0.5457
+
+```
+#### Snodgrassella
+```{r,Snodgrassella_abund}
+Snod = subset_taxa(abundance, Genus=="Snodgrassella")
+
+Chl <- subset_samples(Snod, treatment_cycle =="Control_cycle_1" | treatment_cycle =="Chlorothalonil_cycle_1")
+Chl <- prune_taxa(taxa_sums(Chl) > 0, Chl)
+melt<-psmelt(Chl)
+wilcox.test(Abundance~treatment2, data=melt)
+#W = 66, p-value = 0.7553
+
+#cycle 2
+Chl2 <- subset_samples(Snod, treatment_cycle =="Control_cycle_2" | treatment_cycle =="Chlorothalonil_cycle_2")
+Chl2 <- prune_taxa(taxa_sums(Chl2) > 0, Chl2)
+melt2<-psmelt(Chl2)
+wilcox.test(Abundance~treatment2, data=melt2)
+#W = 98.5, p-value = 0.1332
+
+#cycle 3
+Tet <- subset_samples(Snod, treatment_cycle=="Chlorothalonil_cycle_3_before_stress"|treatment_cycle=="control_Chlorothalonil_cycle_3_before_stress")
+Tet <- prune_taxa(taxa_sums(Tet) > 0, Tet)
+melt3<-psmelt(Tet)
+wilcox.test(Abundance~treatment2, data=melt3)
+#W = 48, p-value = 0.5457
+```
+
+
+#### Commensalibacter
+```{r,Commensalibacter_abund}
+Com = subset_taxa(abundance, Genus=="Commensalibacter")
+
+Chl <- subset_samples(Com, treatment_cycle =="Control_cycle_1" | treatment_cycle =="Chlorothalonil_cycle_1")
+Chl <- prune_taxa(taxa_sums(Chl) > 0, Chl)
+melt<-psmelt(Chl)
+wilcox.test(Abundance~treatment2, data=melt)
+#W = 79, p-value = 0.7125
+
+#cycle 2
+Chl2 <- subset_samples(Com, treatment_cycle =="Control_cycle_2" | treatment_cycle =="Chlorothalonil_cycle_2")
+Chl2 <- prune_taxa(taxa_sums(Chl2) > 0, Chl2)
+melt2<-psmelt(Chl2)
+wilcox.test(Abundance~treatment2, data=melt2)
+#W = 98, p-value = 0.1432
+
+#cycle 3
+Tet <- subset_samples(Com, treatment_cycle=="Chlorothalonil_cycle_3_before_stress"|treatment_cycle=="control_Chlorothalonil_cycle_3_before_stress")
+Tet <- prune_taxa(taxa_sums(Tet) > 0, Tet)
+melt3<-psmelt(Tet)
+wilcox.test(Abundance~treatment2, data=melt3)
+#W = 40, p-value = 1
+```
+
+#### Bifidobacterium
+```{r,Bifidobacterium_abund}
+Bif = subset_taxa(abundance, Genus=="Bifidobacterium")
+
+Chl <- subset_samples(Bif, treatment_cycle =="Control_cycle_1" | treatment_cycle =="Chlorothalonil_cycle_1")
+Chl <- prune_taxa(taxa_sums(Chl) > 0, Chl)
+melt<-psmelt(Chl)
+wilcox.test(Abundance~treatment2, data=melt)
+#W = 67, p-value = 0.7987
+
+#cycle 2
+Chl2 <- subset_samples(Bif, treatment_cycle =="Control_cycle_2" | treatment_cycle =="Chlorothalonil_cycle_2")
+Chl2 <- prune_taxa(taxa_sums(Chl2) > 0, Chl2)
+melt2<-psmelt(Chl2)
+wilcox.test(Abundance~treatment2, data=melt2)
+#W = 61, p-value = 0.5512
+
+#cycle 3
+Tet <- subset_samples(Bif, treatment_cycle=="Chlorothalonil_cycle_3_before_stress"|treatment_cycle=="control_Chlorothalonil_cycle_3_before_stress")
+Tet <- prune_taxa(taxa_sums(Tet) > 0, Tet)
+melt3<-psmelt(Tet)
+wilcox.test(Abundance~treatment2, data=melt3)
+#W = 28, p-value = 0.2973
+
+```
+
+
+### ASV
+
+### have a look on most abundant ASVs in the core taxa to test for response variation on strain level
+
+```{r Gilliamella_ASV}
+tax<-ps1
+tax = rarefy_even_depth(tax, rngseed=1, sample.size=14240, replace=F)
+ps2 <- subset_samples(tax, cycle =="cycle_one"|cycle =="cycle_two"|cycle =="cycle_three_before_stress")
+ps2 <- subset_samples(ps2, treatment2 =="Control"|treatment2 =="Chlorothalonil")
+ps2 <- subset_taxa(ps2, Genus =="Gilliamella")
+
+ps2.3 <- prune_taxa(taxa_sums(ps2) > 1000, ps2)
+#ps2.4 <- subset_taxa(ps2.3, ASV !="ASV0068")
+
+ps2m <- psmelt(ps2.3)
+
+neworder <- c("cycle_one","cycle_two","cycle_three_before_stress")
+change <- c("Cycle one","Cycle two","Cycle three")
+ps_df_sum2 <- arrange(transform(ps2m, cycle=factor(cycle,levels=neworder,labels=change)),cycle)
+
+p<-ggplot(data = ps_df_sum2, aes(x = treatment2, y = Abundance, colour = treatment2)) +
+  geom_point(position = position_jitter())+geom_boxplot(show.legend=FALSE, alpha = 0,colour="grey53",size=0.7)+scale_color_manual(values=c("cyan4","#55596a"),guide = guide_legend(override.aes = list(shape = c(rep(15, 2)),size=7,alpha=0.5)))+theme_bw()
+p<-p + facet_wrap(~ASV, scales="free_y",nrow=2)
+p<-p + theme(strip.text = element_text(size=13,face="bold",color="grey40"))
+taxa2<-p+theme(axis.title.y = element_text(size=13, face="bold"))+theme(axis.text.y = element_text(size=12, face="bold"))+theme(axis.text.x = element_blank())+theme(axis.title.x = element_blank())+theme(strip.background =element_rect(fill="white", color="white"))
+taxa2<- taxa2 + theme(legend.title = element_blank(),legend.background = element_blank(),legend.key = element_blank(),legend.text = element_text(size=14, face="italic"))
+taxa2+ggtitle("Gilliamella apicola")+theme(plot.title = element_text(hjust = 0.5, size=15, face="bold.italic",colour = "darkolivegreen"))+theme(axis.ticks.x=element_blank())
+#ggsave("microbiome/figures/ASV_Gilliamella.png", height = 4.5, width = 8.5)
+```
+
+
+```{r Bifidobacterium_ASV}
+tax<-ps1
+tax = rarefy_even_depth(tax, rngseed=1, sample.size=14240, replace=F)
+ps2 <- subset_samples(tax, cycle =="cycle_one"|cycle =="cycle_two"|cycle =="cycle_three_before_stress")
+ps2 <- subset_samples(ps2, treatment2 =="Control"|treatment2 =="Chlorothalonil")
+ps2 <- subset_taxa(ps2, Genus =="Bifidobacterium")
+
+ps2.3 <- prune_taxa(taxa_sums(ps2) > 1000, ps2)
+ps2m <- psmelt(ps2.3)
+
+neworder <- c("cycle_one","cycle_two","cycle_three_before_stress")
+change <- c("Cycle one","Cycle two","Cycle three")
+ps_df_sum2 <- arrange(transform(ps2m, cycle=factor(cycle,levels=neworder,labels=change)),cycle)
+
+p<-ggplot(data = ps_df_sum2, aes(x = treatment2, y = Abundance, colour = treatment2)) +
+  geom_point(position = position_jitter())+geom_boxplot(show.legend=FALSE, alpha = 0,colour="grey53",size=0.7)+scale_color_manual(values=c("cyan4","#55596a"),guide = guide_legend(override.aes = list(shape = c(rep(15, 2)),size=7,alpha=0.5)))+theme_bw()
+p<-p + facet_wrap(~ASV, scales="free_y",nrow=1)
+p<-p + theme(strip.text = element_text(size=13,face="bold",color="grey40"))
+taxa2<-p+theme(axis.title.y = element_text(size=13, face="bold"))+theme(axis.text.y = element_text(size=12, face="bold"))+theme(axis.text.x = element_blank())+theme(axis.title.x = element_blank())+theme(strip.background =element_rect(fill="white", color="white"))
+taxa2<- taxa2 + theme(legend.title = element_blank(),legend.background = element_blank(),legend.key = element_blank(),legend.text = element_text(size=14, face="italic"))
+taxa2+ggtitle("Bifidobacterium spp.")+theme(plot.title = element_text(hjust = 0.5, size=15, face="bold.italic",colour = "darkolivegreen"))+theme(axis.ticks.x=element_blank())
+#ggsave("microbiome/figures/ASV_Bifidobacterium.png", height = 2.7, width = 8.5)
+```
+
+### species Lactobacillus
+```{r Lacto_species}
+tax<-ps1
+tax = rarefy_even_depth(tax, rngseed=1, sample.size=14240, replace=F)
+ps2 <- subset_samples(tax, cycle =="cycle_one"|cycle =="cycle_two"|cycle =="cycle_three_before_stress")
+ps2 <- subset_samples(ps2, treatment2 =="Control"|treatment2 =="Chlorothalonil")
+ps2 <- subset_taxa(ps2, Genus =="Lactobacillus")
+ps2 <- prune_taxa(taxa_sums(ps2) > 1000, ps2)
+ps2 <- tax_glom(ps2, taxrank = 'Species')
+ps2m <- psmelt(ps2)
+
+neworder <- c("cycle_one","cycle_two","cycle_three_before_stress")
+change <- c("Cycle one","Cycle two","Cycle three")
+ps_df_sum2 <- arrange(transform(ps2m, cycle=factor(cycle,levels=neworder,labels=change)),cycle)
+
+p<-ggplot(data = ps_df_sum2, aes(x = treatment2, y = Abundance, colour = treatment2)) +
+  geom_point(position = position_jitter())+geom_boxplot(show.legend=FALSE, alpha = 0,colour="grey53",size=0.7)+scale_color_manual(values=c("cyan4","#55596a"),guide = guide_legend(override.aes = list(shape = c(rep(15, 2)),size=7,alpha=0.5)))
+p<-p + facet_wrap(~Species, scales="free_y",nrow=2)+theme_bw()
+p<-p + theme(strip.text = element_text(size=13,face="bold.italic",color="grey40"))
+taxa2<-p+theme(axis.title.y = element_text(size=13, face="bold"))+theme(axis.text.y = element_text(size=12, face="bold"))+theme(axis.text.x = element_blank())+theme(axis.title.x = element_blank())+theme(strip.background =element_rect(fill="white", color="white"))
+taxa2<- taxa2 + theme(legend.title = element_blank(),legend.background = element_blank(),legend.key = element_blank(),legend.text = element_text(size=14, face="italic"))
+taxa2+ggtitle("Lactobacillus spp.")+theme(plot.title = element_text(hjust = 0.5, size=15, face="bold.italic",colour = "darkolivegreen"))+theme(axis.ticks.x=element_blank())
+#ggsave("microbiome/figures/Lactobacillus spp.png", height = 4.50, width = 8.5)
+```
+
+
+### ASV Lactobacillus
+```{r ASV_L.apis}
+tax<-ps1
+tax = rarefy_even_depth(tax, rngseed=1, sample.size=14240, replace=F)
+ps2 <- subset_samples(tax, cycle =="cycle_one"|cycle =="cycle_two"|cycle =="cycle_three_before_stress")
+ps2 <- subset_samples(ps2, treatment2 =="Control"|treatment2 =="Chlorothalonil")
+ps2 <- subset_taxa(ps2, Genus =="Lactobacillus")
+ps2 <- subset_taxa(ps2, Species =="Lactobacillus apis")
+ps2.3 <- prune_taxa(taxa_sums(ps2) > 1000, ps2)
+ps2.3 <- prune_taxa(taxa_sums(ps2.3) > 0, ps2.3)
+ps2m <- psmelt(ps2.3)
+neworder <- c("cycle_one","cycle_two","cycle_three_before_stress")
+change <- c("Cycle one","Cycle two","Cycle three")
+ps_df_sum2 <- arrange(transform(ps2m, cycle=factor(cycle,levels=neworder,labels=change)),cycle)
+
+p<-ggplot(data = ps_df_sum2, aes(x = treatment2, y = Abundance, colour = treatment2)) +
+  geom_point(position = position_jitter())+geom_boxplot(show.legend=FALSE, alpha = 0,colour="grey53",size=0.7)+scale_color_manual(values=c("cyan4","#55596a"),guide = guide_legend(override.aes = list(shape = c(rep(15, 2)),size=7,alpha=0.5)))
+p<-p + facet_wrap(~ASV, scales="free_y",nrow=1)+theme_bw()
+p<-p + theme(strip.text = element_text(size=13,face="bold",color="grey40"))
+taxa2<-p+theme(axis.title.y = element_text(size=13, face="bold"))+theme(axis.text.y = element_text(size=12, face="bold"))+theme(axis.text.x = element_blank())+theme(axis.title.x = element_blank())+theme(strip.background =element_rect(fill="white", color="white"))
+taxa2<- taxa2 + theme(legend.title = element_blank(),legend.background = element_blank(),legend.key = element_blank(),legend.text = element_text(size=14, face="italic"))
+taxa2+ggtitle("Lactobacillus apis")+theme(plot.title = element_text(hjust = 0.5, size=15, face="bold.italic",colour = "darkolivegreen"))+theme(axis.ticks.x=element_blank())
+#ggsave("microbiome/figures/ASV_Lactobacillus apis2.png", height = 2.5, width = 6.1)
+```
+# Lactobacillus kullabergensis
+```{r ASV_L.kullabergensis}
+tax<-ps1
+tax = rarefy_even_depth(tax, rngseed=1, sample.size=14240, replace=F)
+ps2 <- subset_samples(tax, cycle =="cycle_one"|cycle =="cycle_two"|cycle =="cycle_three_before_stress")
+ps2 <- subset_samples(ps2, treatment2 =="Control"|treatment2 =="Chlorothalonil")
+ps2 <- subset_taxa(ps2, Genus =="Lactobacillus")
+ps2 <- subset_taxa(ps2, Species =="Lactobacillus kullabergensis")
+ps2.3 <- prune_taxa(taxa_sums(ps2) > 1000, ps2)
+ps2.3 <- prune_taxa(taxa_sums(ps2.3) > 0, ps2.3)
+ps2m <- psmelt(ps2.3)
+neworder <- c("cycle_one","cycle_two","cycle_three_before_stress")
+change <- c("Cycle one","Cycle two","Cycle three")
+ps_df_sum2 <- arrange(transform(ps2m, cycle=factor(cycle,levels=neworder,labels=change)),cycle)
+
+p<-ggplot(data = ps_df_sum2, aes(x = treatment2, y = Abundance, colour = treatment2)) +
+  geom_point(position = position_jitter())+geom_boxplot(show.legend=FALSE, alpha = 0,colour="grey53",size=0.7)+scale_color_manual(values=c("cyan4","#55596a"),guide = guide_legend(override.aes = list(shape = c(rep(15, 2)),size=7,alpha=0.5)))
+p<-p + facet_wrap(~ASV, scales="free_y",nrow=1)+theme_bw()
+p<-p + theme(strip.text = element_text(size=13,face="bold",color="grey40"))
+taxa2<-p+theme(axis.title.y = element_text(size=13, face="bold"))+theme(axis.text.y = element_text(size=12, face="bold"))+theme(axis.text.x = element_blank())+theme(axis.title.x = element_blank())+theme(strip.background =element_rect(fill="white", color="white"))
+taxa2<- taxa2 + theme(legend.title = element_blank(),legend.background = element_blank(),legend.key = element_blank(),legend.text = element_text(size=15, face="italic"))
+taxa2+ggtitle("L. kullabergensis")+theme(plot.title = element_text(hjust = 0.5, size=15, face="bold.italic",colour = "darkolivegreen"))+theme(axis.ticks.x=element_blank())
+#ggsave("microbiome/figures/ASV_Lactobacillus kullabergensis2.png", height = 2.5, width = 6.5)
+```
