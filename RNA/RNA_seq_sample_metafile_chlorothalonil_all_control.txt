@@ -1,0 +1,10 @@
+sample_ID	treatment	history	cage	treatment_stress
+21_Ch1_6	Chlorothalonil	stress_co_evolved	cage_1	Chlorothalonil_before_stress
+21_Ch2_3	Chlorothalonil	stress_co_evolved	cage_2	Chlorothalonil_before_stress
+21_Ch3_4	Chlorothalonil	stress_co_evolved	cage_3	Chlorothalonil_before_stress
+21_C1_G3	Control	control	cage_1	Control_before_stress
+21_C2_G1	Control	control	cage_3	Control_before_stress
+21_C3_G3	Control	control	cage_2	Control_before_stress
+21_C1_Tet4	Control	control	cage_1	Control_before_stress
+21_C2_Tet3	Control	control	cage_2	Control_before_stress
+21_C3_Tet6	Control	control	cage_3	Control_before_stress
