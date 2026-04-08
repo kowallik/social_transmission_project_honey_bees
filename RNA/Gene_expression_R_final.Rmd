@@ -1,0 +1,180 @@
+---
+title: "Gene expression analysis _ chlorothalonil"
+output: html_document
+date: "2023-06-21"
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE) 
+library(Matrix)
+library(tidyverse)
+library(sleuth)
+library(readxl)
+library(ggsignif)
+library(kableExtra)
+library(DESeq2)
+library(tximport)
+library(apeglm)
+library(reshape)
+library(plyr)
+library(ggpubr)
+library(scales)
+```
+
+```{r}
+library(GenomicFeatures)
+library(biomaRt)
+library("systemPipeR")
+mart <- useMart(biomart="metazoa_mart", host="metazoa.ensembl.org")
+datasets <- listDatasets(mart)
+datasets[1:40 , 1:2]
+## choose my data set of interest
+txdb <- makeTxDbFromBiomart(biomart="metazoa_mart",dataset="amellifera_eg_gene", host="metazoa.ensembl.org")
+k <- keys(txdb, keytype = "TXNAME")
+tx2gene <- select(txdb, k, "GENEID", "TXNAME")
+write_csv(tx2gene,"tx2gene_new.csv")
+```
+
+```{r load_data}
+tx2gene <- read_csv("tx2gene_new.csv")
+dirs <- list.files(file.path("kallisto_Chlorothalonil_before_stress_all_controls"))
+samples <- read.table("RNA_seq_sample_metafile_chlorothalonil_all_control.txt", header = TRUE)
+samples
+quant_files <- paste0("kallisto_Chlorothalonil_before_stress_all_controls/",dirs,"/abundance.tsv")
+names(quant_files) <- dirs
+all(file.exists(quant_files))
+txi <- tximport(quant_files,type="kallisto",tx2gene = tx2gene,ignoreTxVersion = TRUE)
+head(txi$counts)
+sampleinfo <- read.delim("RNA_seq_sample_metafile_chlorothalonil_all_control.txt")
+rownames(sampleinfo) <- colnames(txi$counts)
+dds3 <- DESeqDataSetFromTximport(txi, sampleinfo,~treatment)
+keep <- rowSums(counts(dds3)) > 5
+dds3 <- dds3[keep,]
+#set a standard to be compared to (control)
+dds3$treatment <- relevel(dds3$treatment, ref = "Control")
+dds4 <- DESeq(dds3)
+
+```
+
+### PCA
+```{r pca}
+#first normalize with vst to produce log2 scale data
+vstcounts2 <- vst(dds4, blind=TRUE)
+pcaData<-plotPCA(vstcounts2, intgroup=c("treatment"),returnData=TRUE)
+percentVar2 <- round(100 * attr(pcaData, "percentVar"))
+ggplot(pcaData, aes(PC1, PC2, color=treatment)) +
+geom_point(size=4)+xlab(paste0("PC1: ",percentVar2[1],"% variance")) +
+ylab(paste0("PC2: ",percentVar2[2],"% variance")) + 
+coord_fixed()+theme_bw()+theme(legend.title = element_blank())+ scale_color_manual(values=c("#55596a", "#6ebe9f"))+ theme(legend.text = element_text(face="bold", size=15))+theme(axis.text = element_text(size=15))+theme(axis.title = element_text(size=16))#+ylim(-50,50)+xlim(-75,75)
+ggsave("output/pca_all.png", height = 4, width = 6)
+```
+
+
+### MA plots treatments vs hive control
+
+```{r MA_plots}
+#Shrinkage of effect size (LFC estimates) for visualization and ranking of genes.
+resultsNames(dds4)
+resLFC_Chlorothalonil_before <- lfcShrink(dds2, coef="treatment_Chlorothalonil_vs_Control", type="apeglm")
+library(ggpubr)
+Chlorothalonil_before<-ggmaplot(resLFC_Chlorothalonil_before, fdr = 0.05, fc = 1, size = 1.2,palette = c("#B31B21", "#1465AC", "darkgray"),genenames = as.vector(resLFC_Chlorothalonil_before$name),top = 0,legend="top",label.select = NULL)+theme(axis.text.x = element_text(size=16),axis.text.y = element_text(size=15),axis.title.x = element_text(size=17),axis.title.y = element_text(size=17),axis.line = element_line(size = 1, colour="gray20"),axis.ticks = element_line(size = 1, colour="gray20"))+guides(color = guide_legend(override.aes = list(size = c(3,3,3))))+theme(legend.position = c(0.10, 0.13),legend.text=element_text(size=14,face="bold"),legend.background = element_rect(fill="transparent"))
+ggsave("output/MA_before_stress.png", height = 4.5, width = 7)
+```
+
+
+### extract significant differently expressed genes
+
+```{r extract sig genes}
+#extract significant differently expressed genes
+#get annotation for signicificant genes use biomart
+#### make the gene annotation list for Apis mellifera 
+#mart <- useDataset('amellifera_eg_gene', mart)
+#listAttributes(mart)
+#functions <- getBM(attributes=c("ensembl_gene_id", "description"), mart=mart)
+#functions <- functions[functions[,2]!="",]; functions[,2] <- as.character(functions[,2])
+#write.table(functions, "annotationsBiomart.txt", quote=FALSE, row.names=FALSE, col.names=T, sep="\t")
+functions <- read_csv("annotationsBiomart.csv", col_types = cols()) %>% dplyr::select(Gene_ID=ensembl_gene_id,description=description)
+functions <- read_csv("annotationsBiomart.csv", col_types = cols()) %>% dplyr::select(Gene_ID=ensembl_gene_id,description=description)
+
+res_before_sig <- results(dds2, tidy=TRUE, contrast=c("treatment","Chlorothalonil","Control"))
+write.csv(as.data.frame(res_before_sig), file="output/res_before_sig.csv")
+res_before_sig<- subset(res_before_sig, padj < 0.05,pAdjustMethod = "fdr")
+colnames(res_before_sig)[which(names(res_before_sig) == "row")] <- "Gene_ID"
+res_before_sig<-merge(res_before_sig, functions, by="Gene_ID", type="left", match="first")
+write.csv(as.data.frame(res_before_sig), file="output/res_before_sig.csv")
+#How many adjusted p-values were less than 0.05?
+sum(res_before_sig$padj < 0.05, na.rm=TRUE)
+```
+
+
+```{r GO}
+library(AnnotationDbi)
+library(GSEABase)
+library(Category)
+library(GOstats)
+### make the go list for Apis mellifera
+library("biomaRt")
+library("systemPipeR")
+mart <- useDataset('amellifera_eg_gene', mart)
+listAttributes(mart)
+go <- getBM(attributes=c("ensembl_gene_id","go_id", "description","name_1006", "namespace_1003","beebase"), mart=mart)
+go <- go[go[,5]!="",]; go[,5] <- as.character(go[,5])
+go[go[,3]=="molecular_function", 3] <- "F"; go[go[,3]=="biological_process", 3] <- "P"; go[go[,3]=="cellular_component", 3] <- "C"
+go[1:4,]
+dir.create("GO")
+write.table(go, "GO/GOannotationsBiomart_mod.txt", quote=FALSE, row.names=FALSE, col.names=T, sep="\t")
+catdb <- makeCATdb(myfile="GO/GOannotationsBiomart_mod.txt", lib=NULL, org="", colno=c(1,2,3,4), idconv=NULL)
+save(catdb, file="GO/catdb.RData")
+go <- read_csv("GO/GOannotationsBiomart_mod.csv", col_types = cols()) %>% mutate(evidence = "ISS") %>% dplyr::select(GO=go_id, evidence,gene=ensembl_gene_id)
+universe <- unique(go$gene)
+goFrame <- GOFrame(as.data.frame(go %>% dplyr::filter(gene %in% universe)), organism="Apis mellifera")
+goAllFrame <- GOAllFrame(goFrame)
+gsc <- GeneSetCollection(goAllFrame, setType = GOCollection())
+```
+
+List with significant expressed genes -> split into up- and down-regulated to receive individual Go-term files for each
+
+```{r GO_}
+#up
+up <- read.csv("output/significantly_upregulated_genes.csv")
+DsxModuleGo <- hyperGTest(GSEAGOHyperGParams(name = "enriched in treatment",geneSetCollection=gsc,geneIds = intersect(up$Gene_ID,universe), universeGeneIds=universe, ontology = "BP",pvalueCutoff = 0.05,conditional = FALSE,testDirection = "over"))
+summary(DsxModuleGo) %>% kable("html", digits = 3) %>% kable_styling() %>%  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"), full_width = T) %>% scroll_box(height = "400px") 
+GO_enrich.tet <- as.data.frame(summary(DsxModuleGo))
+GO_enrich.tet %>% 
+arrange(Pvalue) %>% 
+write.csv(file = "output/GO_term_enrichment_up.csv")
+### make list
+hub_genesGO <- read.csv("output/GO_term_enrichment_up.csv")
+# keep only highly significant terms
+hub_genesGO <- hub_genesGO %>%
+filter(Pvalue < 0.05) 
+#plot it
+g <- hub_genesGO %>%
+  mutate(logPv = log(Pvalue))
+ggplot(g, aes(x = 0, y = Term, size = Count, color = logPv)) +
+  geom_point(alpha = 0.9) +
+  theme_classic()+theme(axis.title.y = element_blank())+xlim(-0.005, 0.005)+theme(axis.text.x = element_blank())+theme(axis.text.y = element_text(size=14))+theme(axis.title.x = element_blank(),axis.ticks.x = element_blank())
+ggsave("output/GO_terms_up.png", height = 8, width = 12)
+
+
+#down
+down <- read.csv("output/significantly_downregulated_genes.csv")
+DsxModuleGo <- hyperGTest(GSEAGOHyperGParams(name = "down in treatment",geneSetCollection=gsc,geneIds = intersect(down$Gene_ID,universe), universeGeneIds=universe, ontology = "BP",pvalueCutoff = 0.05,conditional = FALSE,testDirection = "over"))
+summary(DsxModuleGo) %>% kable("html", digits = 3) %>% kable_styling() %>%  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"), full_width = T) %>% scroll_box(height = "400px") 
+GO_enrich.tet2 <- as.data.frame(summary(DsxModuleGo))
+GO_enrich.tet2 %>% 
+arrange(Pvalue) %>% 
+write.csv(file = "output/GO_term_enrichment_down.csv")
+### make list
+hub_genesGO2 <- read.csv("output/GO_term_enrichment_down.csv")
+# keep only highly significant terms
+hub_genesGO2 <- hub_genesGO2 %>%
+filter(Pvalue < 0.05) 
+#plot it
+g2 <- hub_genesGO2 %>%
+  mutate(logPv = log(Pvalue))
+ggplot(g2, aes(x = 0, y = Term, size = Count, color = logPv)) +
+  geom_point(alpha = 0.9) +
+  theme_classic()+theme(axis.title.y = element_blank())+xlim(-0.005, 0.005)+theme(axis.text.x = element_blank())+theme(axis.text.y = element_text(size=14))+theme(axis.title.x = element_blank(),axis.ticks.x = element_blank())
+ggsave("output/GO_terms_down.png", height = 8, width = 6)
+```
+
